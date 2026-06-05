@@ -1,0 +1,34 @@
+# Local secrets and auth material
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.sqlite-key
+auth-cache*.json
+
+# KakaoTalk-derived private data
+data/
+archive/
+indexes/
+embeddings/
+cache/
+logs/
+*.db
+*.sqlite
+*.sqlite3
+*.jsonl
+
+# Node / Python common output
+node_modules/
+dist/
+build/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
