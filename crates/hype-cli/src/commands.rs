@@ -1,17 +1,20 @@
 use crate::cli::{ChunkCommand, Commands, SearchCommand, SourceCommand};
+use crate::commands::source_adapter::adapter_for_source;
 use crate::support::{dependency_status, print_payload};
 use anyhow::{Context, Result};
-use hype_adapters::{FixtureAdapter, KakaocliAdapter, SourceAdapter};
 use hype_core::{
     archive::Archive,
     chunking::{rebuild_chunks_with_settings, ChunkSettings},
     config::HypeConfig,
     search::{bm25_search_with_snippet, keyword_search_with_snippet},
     semantic::{
-        planned_semantic_documents, semantic_search_with_snippet, write_semantic_documents,
+        index_semantic_live, planned_semantic_documents, semantic_search_live_with_config,
+        semantic_search_with_snippet, write_semantic_documents,
     },
 };
 use std::path::{Path, PathBuf};
+
+mod source_adapter;
 
 pub(crate) fn run(
     command: Commands,
@@ -105,9 +108,28 @@ fn run_index(
     let documents = planned_semantic_documents(&archive, semantic_dir).context("plan documents")?;
     let written = if dry_run {
         0
-    } else {
-        require_fixture_embedder()?;
+    } else if std::env::var("HYPE_EMBEDDER").unwrap_or_default() == "mock" {
         write_semantic_documents(&archive, semantic_dir).context("write semantic documents")?
+    } else {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("create semantic runtime")?;
+        let report = runtime
+            .block_on(index_semantic_live(&archive, semantic_dir, config))
+            .context("index semantic documents")?;
+        let payload = serde_json::json!({
+            "full": full,
+            "dry_run": dry_run,
+            "candidate_chunks": chunks.len(),
+            "written_documents": report.written_documents,
+            "embedding_calls": report.embedding_calls,
+            "embedded_texts": report.embedded_texts,
+            "documents": documents,
+            "embedder": config.embedder_model,
+            "vectorstore": report.vectorstore
+        });
+        return print_payload(json, &payload);
     };
     let payload = serde_json::json!({
         "full": full,
@@ -119,16 +141,6 @@ fn run_index(
         "embedder": config.embedder_model
     });
     print_payload(json, &payload)
-}
-
-fn require_fixture_embedder() -> Result<()> {
-    let embedder = std::env::var("HYPE_EMBEDDER").unwrap_or_default();
-    if embedder != "mock" {
-        anyhow::bail!(
-            "local embedding server unavailable; start Jina v4 locally or set HYPE_EMBEDDER=mock for fixture QA"
-        );
-    }
-    Ok(())
 }
 
 fn run_search(
@@ -150,14 +162,30 @@ fn run_search(
             print_payload(json, &hits)
         }
         SearchCommand::Semantic { query, json } => {
-            let hits = semantic_search_with_snippet(
-                &archive,
-                semantic_dir,
-                &query,
-                10,
-                config.snippet_length,
-            )
-            .context("semantic search")?;
+            let hits = if std::env::var("HYPE_EMBEDDER").unwrap_or_default() == "mock" {
+                semantic_search_with_snippet(
+                    &archive,
+                    semantic_dir,
+                    &query,
+                    10,
+                    config.snippet_length,
+                )
+                .context("semantic search")?
+            } else {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .context("create semantic runtime")?;
+                runtime
+                    .block_on(semantic_search_live_with_config(
+                        &archive,
+                        semantic_dir,
+                        &query,
+                        10,
+                        config,
+                    ))
+                    .context("semantic search")?
+            };
             print_payload(json, &hits)
         }
     }
@@ -211,15 +239,4 @@ fn run_wipe_index(yes: bool, json: bool, semantic_dir: &Path) -> Result<()> {
         std::fs::remove_dir_all(semantic_dir).context("remove semantic index")?;
     }
     print_payload(json, &serde_json::json!({"semantic_removed": true}))
-}
-
-fn adapter_for_source(source: &str, path: Option<PathBuf>) -> Result<Box<dyn SourceAdapter>> {
-    match source {
-        "fixture" => {
-            let fixture_path = path.context("fixture source requires a JSONL path")?;
-            Ok(Box::new(FixtureAdapter::new(fixture_path)))
-        }
-        "kakaocli" => Ok(Box::new(KakaocliAdapter)),
-        other => anyhow::bail!("unsupported source adapter: {other}"),
-    }
 }

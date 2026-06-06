@@ -29,6 +29,8 @@ kakaotalk-mac-auth.json
 /.minsync/
 /.omo/evidence/hype-qa/
 /.omo/evidence/hype-final-qa/
+/.omo/evidence/live-minsync/*data/
+/.omo/evidence/live-minsync/*.tmp/
 /.omo/ulw-loop/evidence/*data/
 !/.omo/ulw-loop/**/*.jsonl
 *.log

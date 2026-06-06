@@ -1,0 +1,61 @@
+C003 regression evidence
+Commands passed:
+- cargo fmt --all -- --check
+- cargo build --workspace
+- cargo test -p hype-core semantic::endpoint::tests -- --nocapture
+- cargo test -p hype-cli --test live_semantic -- --nocapture
+- cargo test --workspace
+- cargo clippy --workspace --all-targets -- -D warnings
+
+Line audit:
+     218 crates/hype-core/src/semantic/live.rs
+      53 crates/hype-core/src/semantic/endpoint.rs
+     242 crates/hype-cli/src/commands.rs
+      17 crates/hype-cli/src/commands/source_adapter.rs
+     530 total
+
+Pure LOC audit:
+232 crates/hype-cli/src/commands.rs
+209 crates/hype-cli/tests/cli_behaviors.rs
+202 crates/hype-core/src/semantic/live.rs
+175 crates/hype-cli/tests/live_semantic.rs
+173 crates/hype-core/src/archive/write.rs
+173 crates/hype-cli/tests/gap_behaviors.rs
+136 crates/hype-core/src/archive/read.rs
+119 crates/hype-core/src/chunking.rs
+103 crates/hype-core/src/semantic/mock.rs
+103 crates/hype-core/src/search.rs
+102 crates/hype-cli/tests/config_wiring.rs
+75 crates/hype-adapters/src/lib.rs
+71 crates/hype-cli/src/cli.rs
+68 crates/hype-cli/tests/kakaocli_adapter.rs
+65 crates/hype-core/src/types.rs
+62 crates/hype-core/src/archive/schema.rs
+45 crates/hype-core/src/semantic/endpoint.rs
+40 crates/hype-core/src/config.rs
+37 crates/hype-core/src/archive/model.rs
+35 crates/hype-core/tests/planned_behaviors.rs
+29 crates/hype-core/src/lib.rs
+28 crates/hype-core/src/semantic.rs
+26 crates/hype-cli/src/main.rs
+25 crates/hype-core/src/archive.rs
+20 crates/hype-core/src/paths.rs
+19 crates/hype-core/src/fixture.rs
+18 crates/hype-cli/src/support.rs
+16 crates/hype-cli/src/commands/source_adapter.rs
+
+Generated-data ignore audit:
+7:*.sqlite-key
+14:/indexes/
+15:/embeddings/
+19:*.sqlite
+20:*.sqlite3
+21:*.sqlite-shm
+22:*.sqlite-wal
+25:*.lance/
+32:/.omo/evidence/live-minsync/*data/
+
+QA cleanup audit:
+no live-minsync QA tmux sessions remain
+port 18080 is not listening
+port 18081 is not listening

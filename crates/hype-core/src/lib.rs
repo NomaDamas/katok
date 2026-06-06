@@ -40,4 +40,8 @@ pub enum Error {
     Config(#[from] toml::de::Error),
     #[error("local embedding server unavailable; start TEI on http://localhost:8080 or set HYPE_EMBEDDER=mock for synthetic QA")]
     EmbedderUnavailable,
+    #[error("remote embedding endpoints are disabled by default; use a loopback Jina/TEI endpoint or set allow_remote_embeddings = true")]
+    RemoteEmbeddingEndpoint,
+    #[error("MinSync error: {0}")]
+    MinSync(String),
 }

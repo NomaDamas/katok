@@ -43,7 +43,20 @@ Semantic indexing writes deterministic local documents that map back to canonica
 
 `hype search bm25` uses SQLite FTS5 BM25 ranking over the same chunk archive.
 
-`hype search semantic` currently uses the local semantic document bridge in tests. The intended production backend is MinSync with LanceDB and a local Jina embedding server. The target default is `jinaai/jina-embeddings-v4`; document `jinaai/jina-embeddings-v3` as a fallback if v4 cannot be served acceptably on the user's Mac.
+`hype index` uses MinSync with a LanceDB vector store and a loopback Jina/TEI-compatible embedding server by default. The default model id is `tei:jinaai/jina-embeddings-v4` with a 2048-dimensional vector store. Use `jinaai/jina-embeddings-v3` only as a documented fallback if v4 cannot be served acceptably on the user's Mac.
+
+Example local semantic config:
+
+```toml
+embedder_model = "tei:jinaai/jina-embeddings-v4"
+embedder_base_url = "http://127.0.0.1:8080"
+embedding_batch_size = 64
+vector_dimension = 2048
+minsync_dir = "semantic"
+allow_remote_embeddings = false
+```
+
+For synthetic tests and offline CLI checks, `HYPE_EMBEDDER=mock hype index --json` keeps using the deterministic mock bridge. Remote embedding endpoints are rejected unless `allow_remote_embeddings = true` is set explicitly.
 
 Remote embedding or LLM APIs are not enabled by default and must be explicit opt-in.
 

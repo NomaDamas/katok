@@ -21,9 +21,11 @@ hype doctor --json
 hype sync --source fixture tests/fixtures/kakao/replies.jsonl --json
 hype search keyword "검색어" --json
 hype search bm25 "검색어" --json
-HYPE_EMBEDDER=mock hype index --json
+hype index --json
 hype search semantic "지난 회의 보고서" --json
 hype chunk get <chunk-id> --json
 ```
 
 Prefer `hype search ...` for discovery and `hype chunk get ...` only for explicit retrieval.
+
+`hype index` expects a loopback Jina/TEI-compatible embedding server unless `HYPE_EMBEDDER=mock` is intentionally set for synthetic QA. Remote embedding endpoints require explicit config opt-in with `allow_remote_embeddings = true`.

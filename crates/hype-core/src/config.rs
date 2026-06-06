@@ -10,6 +10,9 @@ pub struct HypeConfig {
     pub chunk_gap_direct_seconds: i64,
     pub minsync_dir: PathBuf,
     pub embedder_model: String,
+    pub embedder_base_url: String,
+    pub embedding_batch_size: usize,
+    pub allow_remote_embeddings: bool,
     pub vector_dimension: u16,
     pub snippet_length: usize,
 }
@@ -22,6 +25,9 @@ impl Default for HypeConfig {
             chunk_gap_direct_seconds: 1_800,
             minsync_dir: PathBuf::from("semantic"),
             embedder_model: "tei:jinaai/jina-embeddings-v4".to_string(),
+            embedder_base_url: "http://127.0.0.1:8080".to_string(),
+            embedding_batch_size: 64,
+            allow_remote_embeddings: false,
             vector_dimension: 2_048,
             snippet_length: 80,
         }
