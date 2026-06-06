@@ -1,0 +1,53 @@
+== malformed fixture should fail without private body ==
+Error: read source messages
+
+Caused by:
+    0: fixture parse error on line 2: EOF while parsing a value at line 1 column
+ 249
+    1: EOF while parsing a value at line 1 column 249
+malformed_exit=1
+== unknown chunk should fail ==
+Error: chunk not found: chunk_missing
+unknown_chunk_exit=1
+== unsupported source should fail ==
+Error: unsupported source adapter: nosuch
+unsupported_source_exit=1
+== missing or unconfigured kakaocli should fail safely ==
+Error: list source chats
+
+Caused by:
+    unsupported source adapter: kakaocli not found or not configured
+kakaocli_exit=1
+== empty bm25 query should fail ==
+Error: bm25 search
+
+Caused by:
+    empty query
+empty_bm25_exit=1
+== semantic before index should fail ==
+{
+  "inserted_messages": 3,
+  "updated_messages": 0,
+  "total_messages": 3,
+  "chunks": 2
+}
+Error: semantic search
+
+Caused by:
+    semantic index has never been synced
+semantic_before_index_exit=1
+== repeated sync should be idempotent ==
+{
+  "inserted_messages": 3,
+  "updated_messages": 0,
+  "total_messages": 3,
+  "chunks": 2
+}
+{
+  "inserted_messages": 0,
+  "updated_messages": 0,
+  "total_messages": 3,
+  "chunks": 2
+}
+C002_DONE
+

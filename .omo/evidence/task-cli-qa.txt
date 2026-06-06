@@ -1,0 +1,232 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa doctor --json`
+{
+  "archive": ".omo/evidence/hype-qa/archive.sqlite3",
+  "command": "hype",
+  "data_dir": ".omo/evidence/hype-qa",
+  "local_first": true,
+  "name": "Hydrogen Peroxide",
+  "semantic_index": ".omo/evidence/hype-qa/semantic"
+}
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa source chats --source fixture tests/fixtures/kakao/replies.jsonl --json`
+[
+  {
+    "chat_id": "chat-group-1",
+    "chat_name": "Synthetic Team",
+    "chat_type": "group"
+  }
+]
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa sync --source fixture tests/fixtures/kakao/replies.jsonl --json`
+{
+  "inserted_messages": 3,
+  "total_messages": 3,
+  "chunks": 2
+}
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa search keyword '보고서' --json`
+[
+  {
+    "ranker": "keyword",
+    "rank": 1,
+    "chunk_id": "chunk_2aeac4db0a04ceb2",
+    "chat_name": "Synthetic Team",
+    "sender_nickname": "민지",
+    "started_at": "2026-01-01T09:00:00+00:00",
+    "ended_at": "2026-01-01T09:01:00+00:00",
+    "snippet": "보고서 초안 올렸어요\n검토 부탁드립니다",
+    "score": 1.0,
+    "parent_chunk_ids": []
+  }
+]
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa search bm25 '보고서' --json`
+[
+  {
+    "ranker": "bm25",
+    "rank": 1,
+    "chunk_id": "chunk_2aeac4db0a04ceb2",
+    "chat_name": "Synthetic Team",
+    "sender_nickname": "민지",
+    "started_at": "2026-01-01T09:00:00+00:00",
+    "ended_at": "2026-01-01T09:01:00+00:00",
+    "snippet": "보고서 초안 올렸어요\n검토 부탁드립니다",
+    "score": 1.0,
+    "parent_chunk_ids": []
+  }
+]
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa search semantic '회의 보고서' --json`
+[
+  {
+    "ranker": "semantic",
+    "rank": 1,
+    "chunk_id": "chunk_2aeac4db0a04ceb2",
+    "chat_name": "Synthetic Team",
+    "sender_nickname": "민지",
+    "started_at": "2026-01-01T09:00:00+00:00",
+    "ended_at": "2026-01-01T09:01:00+00:00",
+    "snippet": "보고서 초안 올렸어요\n검토 부탁드립니다",
+    "score": 1.0,
+    "parent_chunk_ids": []
+  },
+  {
+    "ranker": "semantic",
+    "rank": 2,
+    "chunk_id": "chunk_caaaca07be83adf8",
+    "chat_name": "Synthetic Team",
+    "sender_nickname": "준호",
+    "started_at": "2026-01-01T09:02:00+00:00",
+    "ended_at": "2026-01-01T09:02:00+00:00",
+    "snippet": "회의 전에 확인할게요",
+    "score": 0.5,
+    "parent_chunk_ids": [
+      "chunk_2aeac4db0a04ceb2"
+    ]
+  }
+]
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa chunk get chunk_caaaca07be83adf8 --json`
+{
+  "chunk_id": "chunk_caaaca07be83adf8",
+  "chat_id": "chat-group-1",
+  "chat_name": "Synthetic Team",
+  "sender_nickname": "준호",
+  "started_at": "2026-01-01T09:02:00+00:00",
+  "ended_at": "2026-01-01T09:02:00+00:00",
+  "text": "회의 전에 확인할게요",
+  "message_count": 1,
+  "message_ids": [
+    "m3"
+  ],
+  "parent_chunk_ids": [
+    "chunk_2aeac4db0a04ceb2"
+  ]
+}
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa wipe-index --yes --json`
+{
+  "semantic_removed": true
+}
+ULW_QA_DONE
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa doctor --json`
+{
+  "archive": ".omo/evidence/hype-qa/archive.sqlite3",
+  "command": "hype",
+  "data_dir": ".omo/evidence/hype-qa",
+  "local_first": true,
+  "name": "Hydrogen Peroxide",
+  "semantic_index": ".omo/evidence/hype-qa/semantic"
+}
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa source chats --
+source fixture tests/fixtures/kakao/replies.jsonl --json`
+[
+  {
+    "chat_id": "chat-group-1",
+    "chat_name": "Synthetic Team",
+    "chat_type": "group"
+  }
+]
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa sync --source f
+ixture tests/fixtures/kakao/replies.jsonl --json`
+{
+  "inserted_messages": 3,
+  "total_messages": 3,
+  "chunks": 2
+}
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa search keyword
+'보고서' --json`
+[
+  {
+    "ranker": "keyword",
+    "rank": 1,
+    "chunk_id": "chunk_2aeac4db0a04ceb2",
+    "chat_name": "Synthetic Team",
+    "sender_nickname": "민지",
+    "started_at": "2026-01-01T09:00:00+00:00",
+    "ended_at": "2026-01-01T09:01:00+00:00",
+    "snippet": "보고서 초안 올렸어요\n검토 부탁드립니다",
+    "score": 1.0,
+    "parent_chunk_ids": []
+  }
+]
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa search bm25 '보
+고서' --json`
+[
+  {
+    "ranker": "bm25",
+    "rank": 1,
+    "chunk_id": "chunk_2aeac4db0a04ceb2",
+    "chat_name": "Synthetic Team",
+    "sender_nickname": "민지",
+    "started_at": "2026-01-01T09:00:00+00:00",
+    "ended_at": "2026-01-01T09:01:00+00:00",
+    "snippet": "보고서 초안 올렸어요\n검토 부탁드립니다",
+    "score": 1.0,
+    "parent_chunk_ids": []
+  }
+]
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa search semantic
+ '회의 보고서' --json`
+[
+  {
+    "ranker": "semantic",
+    "rank": 1,
+    "chunk_id": "chunk_2aeac4db0a04ceb2",
+    "chat_name": "Synthetic Team",
+    "sender_nickname": "민지",
+    "started_at": "2026-01-01T09:00:00+00:00",
+    "ended_at": "2026-01-01T09:01:00+00:00",
+    "snippet": "보고서 초안 올렸어요\n검토 부탁드립니다",
+    "score": 1.0,
+    "parent_chunk_ids": []
+  },
+  {
+    "ranker": "semantic",
+    "rank": 2,
+    "chunk_id": "chunk_caaaca07be83adf8",
+    "chat_name": "Synthetic Team",
+    "sender_nickname": "준호",
+    "started_at": "2026-01-01T09:02:00+00:00",
+    "ended_at": "2026-01-01T09:02:00+00:00",
+    "snippet": "회의 전에 확인할게요",
+    "score": 0.5,
+    "parent_chunk_ids": [
+      "chunk_2aeac4db0a04ceb2"
+    ]
+  }
+]
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa chunk get chunk
+_caaaca07be83adf8 --json`
+{
+  "chunk_id": "chunk_caaaca07be83adf8",
+  "chat_id": "chat-group-1",
+  "chat_name": "Synthetic Team",
+  "sender_nickname": "준호",
+  "started_at": "2026-01-01T09:02:00+00:00",
+  "ended_at": "2026-01-01T09:02:00+00:00",
+  "text": "회의 전에 확인할게요",
+  "message_count": 1,
+  "message_ids": [
+    "m3"
+  ],
+  "parent_chunk_ids": [
+    "chunk_2aeac4db0a04ceb2"
+  ]
+}
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `target/debug/hype --data-dir .omo/evidence/hype-qa wipe-index --ye
+s --json`
+{
+  "semantic_removed": true
+}
+ULW_QA_DONE
+

@@ -1,0 +1,14 @@
+{
+  "goal": {
+    "threadId": "019e97f8-a94f-7ea3-9f92-60e53f4f6ff6",
+    "objective": "Create a decision-complete implementation plan for Hydrogen Peroxide / hype: a macOS-local KakaoTalk memory CLI with chunking, MinSync-based incremental indexing, keyword/BM25/semantic search, chunk retrieval, local Jina embeddings, privacy guardrails, README story, and related-project research.",
+    "status": "complete",
+    "tokensUsed": 240069,
+    "timeUsedSeconds": 37159,
+    "createdAt": 1780667203,
+    "updatedAt": 1780711653
+  },
+  "remainingTokens": null,
+  "completionBudgetReport": null,
+  "note": "This Codex goal snapshot was already complete for the prior planning objective. Current implementation completion is tracked in .omo/ulw-loop state."
+}

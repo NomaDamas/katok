@@ -1,111 +1,86 @@
-# Kakao Memory
+# Hydrogen Peroxide (`hype`)
 
-Local-first semantic memory for KakaoTalk on macOS.
+Hydrogen Peroxide is a local-first KakaoTalk memory CLI for macOS. The short command is `hype`.
 
-Kakao Memory turns a user's KakaoTalk conversations into a private, searchable local memory store. The first target is the macOS KakaoTalk app: read messages through the existing local-database access path, normalize them into a durable local archive, and provide keyword and semantic search through a CLI and agent skill.
+It reads KakaoTalk messages through a source adapter, normalizes them into a private local archive, builds Kakao-aware chunks, and exposes keyword, BM25, semantic, and chunk-id lookup commands from the shell.
 
-## Why
+## Why Hydrogen Peroxide?
 
-Kakao's official APIs do not expose personal chat history. Existing public projects mostly fall into two buckets:
+KakaoTalk is named after cacao, and cacao is the chocolate ingredient that can poison a dog. The joke behind this project is that KakaoTalk's personal-history access is so locked down that the user feels like the dog in trouble. Hydrogen peroxide is the emergency antidote in the story: `hype` is the local tool that helps recover usable memory from KakaoTalk without uploading private chat history.
 
-- macOS local DB CLIs such as `kakaocli` and `openkakao-cli`, which can read and search local KakaoTalk data but do not provide a durable semantic index.
-- export-file analyzers and RAG demos, which parse manually exported `.txt` or `.csv` files but do not continuously index the live local Mac database.
-
-Kakao Memory aims to fill that gap:
-
-```text
-KakaoTalk local DB
-  -> read-only ingestion
-  -> normalized local archive
-  -> keyword index + vector index
-  -> CLI + agent skill search
-```
-
-## Product Shape
-
-The project should be usable both directly from a shell and through an agent skill.
-
-Initial CLI sketch:
+## Current CLI
 
 ```bash
-kakao-memory doctor
-kakao-memory index --since 30d
-kakao-memory sync
-kakao-memory search "회의"
-kakao-memory semantic-search "지난달 세금 얘기한 대화"
-kakao-memory inspect-message <message-id>
-kakao-memory wipe-index
+hype doctor --json
+hype source chats --source fixture tests/fixtures/kakao/replies.jsonl --json
+hype sync --source fixture tests/fixtures/kakao/replies.jsonl --json
+hype index --json
+hype search keyword "보고서" --json
+hype search bm25 "보고서" --json
+hype search semantic "회의 보고서" --json
+hype chunk get <chunk-id> --json
+hype wipe-index --yes --json
 ```
 
-The skill wrapper should stay thin: explain permissions, call the CLI, summarize results, and never expose secrets or raw private content unless the user explicitly asks for the matching query result.
+The current automated adapter is a synthetic JSONL fixture adapter. The first real macOS source adapter should call `kakaocli` or the `k-skill` `kakaotalk-mac` helper for read-only JSON output rather than reimplementing SQLCipher database reverse engineering.
 
-## Architecture
+## Chunk Strategy
 
-### Ingestion
+Hydrogen Peroxide owns canonical chat chunking.
 
-Use a read-only source adapter rather than reimplementing KakaoTalk DB reverse engineering from scratch.
+- Consecutive messages by the same nickname stay in one canonical chunk.
+- A large time gap starts a new chunk even when the nickname is unchanged.
+- Default thresholds are 10 minutes for group chats and 30 minutes for direct chats.
+- Reply metadata is stored as parent chunk references when the parent message is indexed.
+- `hype search ...` returns minimal snippets and metadata.
+- `hype chunk get <chunk-id>` is the explicit command for full chunk content.
 
-Candidate source adapters:
+Semantic indexing writes deterministic local documents that map back to canonical chunk ids. This keeps MinSync/vector search from redefining chat boundaries.
 
-- `kakaocli` with `--json`, `--db`, and `--key`
-- the `k-skill` `kakaotalk-mac` helper for auth recovery and cached DB/key resolution
-- future adapters for manual `.txt` / `.csv` exports
+## Search
 
-### Archive
+`hype search keyword` performs deterministic local matching over canonical chunks.
 
-Store normalized messages in a local SQLite database:
+`hype search bm25` uses SQLite FTS5 BM25 ranking over the same chunk archive.
 
-- account/device identity hash, not raw account secrets
-- chat id and display name
-- message id/log id
-- sender id and display name
-- timestamp
-- message type
-- text
-- source cursor for incremental indexing
+`hype search semantic` currently uses the local semantic document bridge in tests. The intended production backend is MinSync with LanceDB and a local Jina embedding server. The target default is `jinaai/jina-embeddings-v4`; document `jinaai/jina-embeddings-v3` as a fallback if v4 cannot be served acceptably on the user's Mac.
 
-### Search
+Remote embedding or LLM APIs are not enabled by default and must be explicit opt-in.
 
-Provide two search paths:
+## Privacy
 
-- keyword search over normalized text, preferably SQLite FTS5
-- semantic search over chunks with metadata filters
-
-The first semantic backend should be local-first. Remote embedding APIs can exist only as explicit opt-in.
-
-### Privacy
-
-Everything in this project is sensitive:
+Everything produced by this project is sensitive:
 
 - KakaoTalk DB paths and SQLCipher keys
-- normalized message archive
-- embedding cache
-- search result snippets
-- logs and screenshots
+- normalized message archives
+- generated semantic documents
+- embedding caches and vector indexes
+- search evidence and logs
 
-Default behavior must keep data local, use restrictive file permissions, and avoid telemetry.
+Generated stores are ignored by git and should live under a user-only data directory. Automated tests use synthetic chat fixtures only. Real KakaoTalk smoke tests are manual-only and must not print private message content unless the user explicitly asks for that exact output.
 
-## Non-Goals
+## Related Projects
 
-- No Kakao official API integration for personal chat history.
-- No server upload by default.
-- No protocol-level sending or bot automation in the first version.
-- No multi-user hosted product until local privacy and deletion semantics are solid.
-
-## Research Notes
-
-Relevant public projects found during initial survey:
+Relevant public projects found during the planning survey:
 
 - `silver-flight-group/kakaocli`: macOS local DB read/search/sync CLI.
 - `JungHoonGhae/openkakao-cli`: local DB read/search plus LOCO-oriented flows.
 - `xistoh162108/kakaotalk_analyzer`: export CSV analysis with embedding and SPLADE ideas.
 - `teddylee777/kakaotalk-gpt`: export txt/csv RAG with FAISS/Chroma retrievers.
-- `sanggubot/doppelganger-gpt`: small KakaoTalk txt to Chroma example.
+- `sanggubot/doppelganger-gpt`: KakaoTalk txt to Chroma example.
 - `uoneway/kakaotalk_msg_preprocessor`: exported txt parser.
 - `claudianus/kakaotalk-chat-analyzer`: CSV export to anonymized HTML report.
+- `NomaDamas/MinSync`: Rust manifest-based incremental vector DB indexing CLI using LanceDB and local TEI support.
 
-No complete project was found that continuously turns the macOS KakaoTalk local DB into a private filesystem-like archive plus semantic search index.
+No complete project was found that continuously turns the macOS KakaoTalk local DB into a private local archive plus keyword, BM25, and semantic chunk search.
 
-## Status
+## Development
 
-Concept repo. No production implementation yet.
+```bash
+cargo fmt --all -- --check
+cargo build --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Do not add real KakaoTalk exports, SQLCipher keys, auth caches, embeddings, indexes, or local archives to this repository.

@@ -1,0 +1,23 @@
+[workspace]
+members = ["crates/hype-adapters", "crates/hype-cli", "crates/hype-core"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.81"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+assert_cmd = "2"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+predicates = "3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+toml = "0.8"

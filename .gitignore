@@ -6,18 +6,35 @@
 *.p12
 *.sqlite-key
 auth-cache*.json
+kakaotalk-mac-auth.json
 
 # KakaoTalk-derived private data
-data/
-archive/
-indexes/
-embeddings/
-cache/
-logs/
+/data/
+/archive/
+/indexes/
+/embeddings/
+/cache/
+/logs/
 *.db
 *.sqlite
 *.sqlite3
+*.sqlite-shm
+*.sqlite-wal
 *.jsonl
+!tests/fixtures/**/*.jsonl
+*.lance/
+
+# Hydrogen Peroxide generated stores
+/.hype/
+/.minsync/
+/.omo/evidence/hype-qa/
+/.omo/evidence/hype-final-qa/
+/.omo/ulw-loop/evidence/*data/
+!/.omo/ulw-loop/**/*.jsonl
+*.log
+
+# Rust
+/target/
 
 # Node / Python common output
 node_modules/

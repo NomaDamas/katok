@@ -1,0 +1,163 @@
+== doctor ==
+{
+  "archive": {
+    "status": "missing"
+  },
+  "command": "hype",
+  "data_dir": ".omo/ulw-loop/evidence/final-happy-data",
+  "embedder": {
+    "dimension": 2048,
+    "mode": "local",
+    "model": "tei:jinaai/jina-embeddings-v4"
+  },
+  "local_first": true,
+  "macos": true,
+  "name": "Hydrogen Peroxide",
+  "semantic_index": ".omo/ulw-loop/evidence/final-happy-data/semantic",
+  "source_adapter": {
+    "configured": "fixture",
+    "fixture": "ok",
+    "kakaocli": "ok"
+  }
+}
+== source chats ==
+[
+  {
+    "chat_id": "chat-group-1",
+    "chat_name": "Synthetic Team",
+    "chat_type": "group"
+  }
+]
+== sync ==
+{
+  "inserted_messages": 3,
+  "updated_messages": 0,
+  "total_messages": 3,
+  "chunks": 2
+}
+== index dry ==
+{
+  "candidate_chunks": 2,
+  "documents": [
+    {
+      "chunk_id": "chunk_2aeac4db0a04ceb2",
+      "path": ".omo/ulw-loop/evidence/final-happy-data/semantic/source/chunks/ch
+unk_2aeac4db0a04ceb2.md"
+    },
+    {
+      "chunk_id": "chunk_caaaca07be83adf8",
+      "path": ".omo/ulw-loop/evidence/final-happy-data/semantic/source/chunks/ch
+unk_caaaca07be83adf8.md"
+    }
+  ],
+  "dry_run": true,
+  "embedder": "tei:jinaai/jina-embeddings-v4",
+  "embedding_calls": 0,
+  "full": false,
+  "written_documents": 0
+}
+== index mock ==
+{
+  "candidate_chunks": 2,
+  "documents": [
+    {
+      "chunk_id": "chunk_2aeac4db0a04ceb2",
+      "path": ".omo/ulw-loop/evidence/final-happy-data/semantic/source/chunks/ch
+unk_2aeac4db0a04ceb2.md"
+    },
+    {
+      "chunk_id": "chunk_caaaca07be83adf8",
+      "path": ".omo/ulw-loop/evidence/final-happy-data/semantic/source/chunks/ch
+unk_caaaca07be83adf8.md"
+    }
+  ],
+  "dry_run": false,
+  "embedder": "tei:jinaai/jina-embeddings-v4",
+  "embedding_calls": 2,
+  "full": false,
+  "written_documents": 2
+}
+== keyword ==
+[
+  {
+    "ranker": "keyword",
+    "rank": 1,
+    "chunk_id": "chunk_2aeac4db0a04ceb2",
+    "chat_name": "Synthetic Team",
+    "sender_nickname": "민지",
+    "started_at": "2026-01-01T09:00:00+00:00",
+    "ended_at": "2026-01-01T09:01:00+00:00",
+    "snippet": "보고서 초안 올렸어요\n검토 부탁드립니다",
+    "score": 1.0,
+    "parent_chunk_ids": []
+  }
+]
+== bm25 ==
+[
+  {
+    "ranker": "bm25",
+    "rank": 1,
+    "chunk_id": "chunk_2aeac4db0a04ceb2",
+    "chat_name": "Synthetic Team",
+    "sender_nickname": "민지",
+    "started_at": "2026-01-01T09:00:00+00:00",
+    "ended_at": "2026-01-01T09:01:00+00:00",
+    "snippet": "보고서 초안 올렸어요\n검토 부탁드립니다",
+    "score": 1.0,
+    "parent_chunk_ids": []
+  }
+]
+== semantic ==
+[
+  {
+    "ranker": "semantic",
+    "rank": 1,
+    "chunk_id": "chunk_2aeac4db0a04ceb2",
+    "chat_name": "Synthetic Team",
+    "sender_nickname": "민지",
+    "started_at": "2026-01-01T09:00:00+00:00",
+    "ended_at": "2026-01-01T09:01:00+00:00",
+    "snippet": "보고서 초안 올렸어요\n검토 부탁드립니다",
+    "score": 1.0,
+    "parent_chunk_ids": []
+  },
+  {
+    "ranker": "semantic",
+    "rank": 2,
+    "chunk_id": "chunk_caaaca07be83adf8",
+    "chat_name": "Synthetic Team",
+    "sender_nickname": "준호",
+    "started_at": "2026-01-01T09:02:00+00:00",
+    "ended_at": "2026-01-01T09:02:00+00:00",
+    "snippet": "회의 전에 확인할게요",
+    "score": 0.5,
+    "parent_chunk_ids": [
+      "chunk_2aeac4db0a04ceb2"
+    ]
+  }
+]
+== chunk get ==
+{
+  "chunk_id": "chunk_caaaca07be83adf8",
+  "chat_id": "chat-group-1",
+  "chat_name": "Synthetic Team",
+  "sender_nickname": "준호",
+  "started_at": "2026-01-01T09:02:00+00:00",
+  "ended_at": "2026-01-01T09:02:00+00:00",
+  "text": "회의 전에 확인할게요",
+  "message_count": 1,
+  "message_ids": [
+    "m3"
+  ],
+  "parent_chunk_ids": [
+    "chunk_2aeac4db0a04ceb2"
+  ]
+}
+== wipe ==
+{
+  "semantic_removed": true
+}
+C001_DONE
+~/Projects-dev/kakao-memory ──────────────────── jeffrey@Mac-Studio 12:27:00 PM
+❯
+

@@ -1,0 +1,21 @@
+{
+  "archive": {
+    "status": "missing"
+  },
+  "command": "hype",
+  "data_dir": ".omo/evidence/hype-final-qa",
+  "embedder": {
+    "dimension": 2048,
+    "mode": "local",
+    "model": "tei:jinaai/jina-embeddings-v4"
+  },
+  "local_first": true,
+  "macos": true,
+  "name": "Hydrogen Peroxide",
+  "semantic_index": ".omo/evidence/hype-final-qa/semantic",
+  "source_adapter": {
+    "configured": "fixture",
+    "fixture": "ok",
+    "kakaocli": "ok"
+  }
+}

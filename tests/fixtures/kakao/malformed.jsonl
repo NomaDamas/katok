@@ -1,0 +1,2 @@
+{"account_hash":"acct-synthetic","chat_id":"chat-bad","chat_name":"Synthetic Bad","chat_type":"group","message_id":"bad-1","sender_id":"u1","sender_nickname":"민지","timestamp":"2026-01-01T09:00:00Z","text":"valid synthetic row","message_type":"text","reply_to_message_id":null}
+{"account_hash":"acct-synthetic","chat_id":"chat-bad","chat_name":"Synthetic Bad","chat_type":"group","message_id":"bad-2","sender_id":"u1","sender_nickname":"민지","timestamp":"2026-01-01T09:01:00Z","text":"PRIVATE-MALFORMED-BODY","message_type":

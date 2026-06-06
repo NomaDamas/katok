@@ -1,0 +1,14 @@
+[
+  {
+    "ranker": "keyword",
+    "rank": 1,
+    "chunk_id": "chunk_2aeac4db0a04ceb2",
+    "chat_name": "Synthetic Team",
+    "sender_nickname": "민지",
+    "started_at": "2026-01-01T09:00:00+00:00",
+    "ended_at": "2026-01-01T09:01:00+00:00",
+    "snippet": "보고서 초안 올렸어요\n검토 부탁드립니다",
+    "score": 1.0,
+    "parent_chunk_ids": []
+  }
+]
