@@ -1,49 +1,81 @@
-# Hydrogen Peroxide (`hype`)
+# katok
 
-Hydrogen Peroxide is a local-first KakaoTalk memory CLI for macOS. The short command is `hype`.
+`katok` is a local-first KakaoTalk memory CLI for macOS. The short command is `katok`.
 
 It reads KakaoTalk messages through a source adapter, normalizes them into a private local archive, builds Kakao-aware chunks, and exposes keyword, BM25, semantic, and chunk-id lookup commands from the shell.
 
-## Why Hydrogen Peroxide?
+## Why "katok"?
 
-KakaoTalk is named after cacao, and cacao is the chocolate ingredient that can poison a dog. The joke behind this project is that KakaoTalk's personal-history access is so locked down that the user feels like the dog in trouble. Hydrogen peroxide is the emergency antidote in the story: `hype` is the local tool that helps recover usable memory from KakaoTalk without uploading private chat history.
+"카톡" (katok) is the everyday Korean nickname for KakaoTalk, so the name says exactly what the tool is for: searching your own KakaoTalk history. Everything runs locally — `katok` helps you recover usable memory from KakaoTalk without uploading private chat history.
 
 ## Current CLI
 
 ```bash
-hype doctor --json
-hype source chats --source fixture tests/fixtures/kakao/replies.jsonl --json
-hype sync --source fixture tests/fixtures/kakao/replies.jsonl --json
-hype index --json
-hype search keyword "보고서" --json
-hype search bm25 "보고서" --json
-hype search semantic "회의 보고서" --json
-hype chunk get <chunk-id> --json
-hype wipe-index --yes --json
+katok doctor --json
+katok source chats --source fixture tests/fixtures/kakao/replies.jsonl --json
+katok sync --source fixture tests/fixtures/kakao/replies.jsonl --json
+katok sync --source macos --json
+katok sync --json                    # uses source_adapter from config
+katok index --json
+katok search keyword "보고서" --json
+katok search bm25 "보고서" --json
+katok search semantic "회의 보고서" --json
+katok chunk get <chunk-id> --json
+katok wipe-index --yes --json
 ```
 
-The current automated adapter is a synthetic JSONL fixture adapter. The first real macOS source adapter should call `kakaocli` or the `k-skill` `kakaotalk-mac` helper for read-only JSON output rather than reimplementing SQLCipher database reverse engineering.
+## 빠른 시작 (macOS 카카오톡)
+
+```bash
+cargo build --workspace
+cargo run -p katok-cli -- doctor --json
+cargo run -p katok-cli -- sync --source macos --json
+cargo run -p katok-cli -- search keyword "검색어" --json
+```
+
+- 먼저 macOS 설정에서 터미널 앱에 **전체 디스크 접근 권한**을 주세요.
+- `doctor`는 카카오톡 앱/컨테이너/DB 파일 개수/인증 캐시 여부만 보여줍니다. 대화 내용은 출력하지 않습니다.
+- `sync --source macos`는 로컬 Mac에 저장된 카카오톡 DB만 읽습니다. 서버 업로드나 원격 API 호출은 없습니다.
+- 검색 결과의 snippet은 짧게 유지됩니다. 긴 원문 확인은 사용자가 명시적으로 `katok chunk get <chunk-id>`를 실행할 때만 합니다.
+
+## macOS Source
+
+`katok` reads the live KakaoTalk macOS installation directly in Rust — no Python, no `kakaocli`, and no external tooling at runtime.
+
+```bash
+katok sync --source macos --json
+# or, with source_adapter = "macos" in katok.toml:
+katok sync --json
+```
+
+Requirements:
+
+- The terminal running `katok` must have macOS **Full Disk Access** (System Settings → Privacy & Security → Full Disk Access) to read files under `~/Library/Containers/com.kakao.KakaoTalkMac/`.
+- Messages from a chat must have been opened or synced inside the KakaoTalk app — only locally present DB records are readable.
+- On first sync, `katok` spends a few seconds recovering the account identifier from the encrypted SQLCipher database and then caches only `{user_id, uuid}` at mode `0600` under the data directory. The key material itself is never persisted.
+
+`katok doctor --json` reports macOS readiness (booleans and counts only, no private content) under `.source_adapter.macos`.
 
 ## Chunk Strategy
 
-Hydrogen Peroxide owns canonical chat chunking.
+`katok` owns canonical chat chunking.
 
 - Consecutive messages by the same nickname stay in one canonical chunk.
 - A large time gap starts a new chunk even when the nickname is unchanged.
 - Default thresholds are 10 minutes for group chats and 30 minutes for direct chats.
 - Reply metadata is stored as parent chunk references when the parent message is indexed.
-- `hype search ...` returns minimal snippets and metadata.
-- `hype chunk get <chunk-id>` is the explicit command for full chunk content.
+- `katok search ...` returns minimal snippets and metadata.
+- `katok chunk get <chunk-id>` is the explicit command for full chunk content.
 
 Semantic indexing writes deterministic local documents that map back to canonical chunk ids. This keeps MinSync/vector search from redefining chat boundaries.
 
 ## Search
 
-`hype search keyword` performs deterministic local matching over canonical chunks.
+`katok search keyword` performs deterministic local matching over canonical chunks.
 
-`hype search bm25` uses SQLite FTS5 BM25 ranking over the same chunk archive.
+`katok search bm25` uses SQLite FTS5 BM25 ranking over the same chunk archive.
 
-`hype index` uses MinSync with a LanceDB vector store and a loopback Jina/TEI-compatible embedding server by default. The default model id is `tei:jinaai/jina-embeddings-v4` with a 2048-dimensional vector store. Use `jinaai/jina-embeddings-v3` only as a documented fallback if v4 cannot be served acceptably on the user's Mac.
+`katok index` uses MinSync with a LanceDB vector store and a loopback Jina/TEI-compatible embedding server by default. The default model id is `tei:jinaai/jina-embeddings-v4` with a 2048-dimensional vector store. Use `jinaai/jina-embeddings-v3` only as a documented fallback if v4 cannot be served acceptably on the user's Mac.
 
 Example local semantic config:
 
@@ -56,7 +88,7 @@ minsync_dir = "semantic"
 allow_remote_embeddings = false
 ```
 
-For synthetic tests and offline CLI checks, `HYPE_EMBEDDER=mock hype index --json` keeps using the deterministic mock bridge. Remote embedding endpoints are rejected unless `allow_remote_embeddings = true` is set explicitly.
+For synthetic tests and offline CLI checks, `KATOK_EMBEDDER=mock katok index --json` keeps using the deterministic mock bridge. Remote embedding endpoints are rejected unless `allow_remote_embeddings = true` is set explicitly.
 
 Remote embedding or LLM APIs are not enabled by default and must be explicit opt-in.
 
