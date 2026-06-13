@@ -1,1 +1,0 @@
-Implement the full Hydrogen Peroxide / hype plan in .omo/plans/hydrogen-peroxide-hype.md, reduce measured gaps versus the plan, verify with TDD and manual tmux QA, then commit well and push to origin/main only after all required implementation gaps are closed.
