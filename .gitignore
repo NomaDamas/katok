@@ -7,6 +7,9 @@
 *.sqlite-key
 auth-cache*.json
 kakaotalk-mac-auth.json
+# katok native KakaoTalk reader cache ({user_id, uuid} only, never the key)
+kakao/auth.json
+**/kakao/auth.json
 
 # KakaoTalk-derived private data
 /data/
@@ -24,9 +27,10 @@ kakaotalk-mac-auth.json
 !tests/fixtures/**/*.jsonl
 *.lance/
 
-# Hydrogen Peroxide generated stores
-/.hype/
+# katok generated stores
+/.katok/
 /.minsync/
+/.omo/ulw-loop/
 /.omo/evidence/hype-qa/
 /.omo/evidence/hype-final-qa/
 /.omo/evidence/live-minsync/*data/

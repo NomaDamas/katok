@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/hype-adapters", "crates/hype-cli", "crates/hype-core"]
+members = [
+    "crates/katok-adapters",
+    "crates/katok-cli",
+    "crates/katok-core",
+    "crates/katok-kakao",
+]
 resolver = "2"
 
 [workspace.package]
@@ -15,7 +20,7 @@ clap = { version = "4", features = ["derive"] }
 dirs = "6"
 minsync = { path = "../MinSync" }
 predicates = "3"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
