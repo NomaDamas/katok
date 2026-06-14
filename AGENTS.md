@@ -6,14 +6,6 @@ These instructions apply to this repository and all child directories.
 
 Kakao Memory is a local-first semantic memory and search layer for KakaoTalk conversations on macOS. Treat it as privacy-sensitive infrastructure, not a casual chat analyzer.
 
-## Privacy and Safety
-
-- Never print, commit, upload, or log raw KakaoTalk message content unless the user explicitly requested that exact output.
-- Never commit SQLCipher keys, auth caches, local DB paths containing private account material, embeddings, generated indexes, or message archives.
-- Default all generated local data stores to user-only permissions where the platform supports it.
-- Remote embedding or LLM APIs must be opt-in and clearly documented. Local-first is the default.
-- Search snippets should be minimal by default and should include enough metadata for the user to locate the result without dumping surrounding private history.
-
 ## Architecture Guidelines
 
 - Prefer source adapters over duplicating DB reverse engineering logic.

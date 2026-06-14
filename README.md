@@ -40,6 +40,8 @@ cargo run -p katok-cli -- search semantic "검색어" --json
 - `index`는 기본값으로 앱 프로세스 안에서 `embeddinggemma-300m` q4 ONNX 모델을 실행합니다. Python 서버, TEI 서버, Jina 서버를 따로 띄우지 않습니다.
 - 검색 결과의 snippet은 짧게 유지됩니다. 긴 원문 확인은 사용자가 명시적으로 `katok chunk get <chunk-id>`를 실행할 때만 합니다.
 
+권한 설정을 처음부터 안내하려면 `scripts/katok-macos-setup.sh`를 실행하세요. 자세한 흐름은 [macOS first-run setup](docs/macos-first-run.md)에 정리되어 있습니다.
+
 ## macOS Source
 
 `katok` reads the live KakaoTalk macOS installation directly in Rust — no Python, no `kakaocli`, and no external tooling at runtime.
