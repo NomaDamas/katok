@@ -32,4 +32,4 @@ katok chunk get <chunk-id> --json
 
 Prefer `katok search ...` for discovery and `katok chunk get ...` only for explicit retrieval.
 
-`katok index` expects a loopback Jina/TEI-compatible embedding server unless `KATOK_EMBEDDER=mock` is intentionally set for synthetic QA. Remote embedding endpoints require explicit config opt-in with `allow_remote_embeddings = true`.
+`katok index` runs the local `embeddinggemma-300m-q4` embedder in-process by default. Do not ask the user to start a Python, Jina, TEI, or local HTTP embedding server. Use `KATOK_EMBEDDER=mock` only for synthetic QA and `KATOK_EMBEDDER=local-test` only when you need deterministic local vector tests without downloading the model.

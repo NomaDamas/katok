@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 chrono.workspace = true
 dirs.workspace = true
-minsync.workspace = true
+fastembed = { version = "5.16.1", default-features = false, features = ["hf-hub-native-tls", "ort-download-binaries-native-tls"] }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -17,6 +17,8 @@ kakao/auth.json
 /indexes/
 /embeddings/
 /cache/
+/.fastembed_cache/
+**/.fastembed_cache/
 /logs/
 *.db
 *.sqlite

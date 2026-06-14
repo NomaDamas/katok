@@ -18,7 +18,6 @@ assert_cmd = "2"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
-minsync = { path = "../MinSync" }
 predicates = "3"
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 serde = { version = "1", features = ["derive"] }

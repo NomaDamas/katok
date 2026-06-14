@@ -30,7 +30,7 @@ fn cli_honors_configured_chunk_gap_when_syncing() {
 fn cli_honors_configured_semantic_dir_when_indexing() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let config = dir.path().join("katok.toml");
-    std::fs::write(&config, "minsync_dir = \"custom-semantic\"\n").expect("write config");
+    std::fs::write(&config, "semantic_dir = \"custom-semantic\"\n").expect("write config");
     let data_dir = dir.path().join("data");
 
     Command::cargo_bin("katok")

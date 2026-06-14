@@ -30,12 +30,14 @@ katok wipe-index --yes --json
 cargo build --workspace
 cargo run -p katok-cli -- doctor --json
 cargo run -p katok-cli -- sync --source macos --json
-cargo run -p katok-cli -- search keyword "검색어" --json
+cargo run -p katok-cli -- index --json
+cargo run -p katok-cli -- search semantic "검색어" --json
 ```
 
 - 먼저 macOS 설정에서 터미널 앱에 **전체 디스크 접근 권한**을 주세요.
 - `doctor`는 카카오톡 앱/컨테이너/DB 파일 개수/인증 캐시 여부만 보여줍니다. 대화 내용은 출력하지 않습니다.
 - `sync --source macos`는 로컬 Mac에 저장된 카카오톡 DB만 읽습니다. 서버 업로드나 원격 API 호출은 없습니다.
+- `index`는 기본값으로 앱 프로세스 안에서 `embeddinggemma-300m` q4 ONNX 모델을 실행합니다. Python 서버, TEI 서버, Jina 서버를 따로 띄우지 않습니다.
 - 검색 결과의 snippet은 짧게 유지됩니다. 긴 원문 확인은 사용자가 명시적으로 `katok chunk get <chunk-id>`를 실행할 때만 합니다.
 
 ## macOS Source
@@ -67,7 +69,7 @@ Requirements:
 - `katok search ...` returns minimal snippets and metadata.
 - `katok chunk get <chunk-id>` is the explicit command for full chunk content.
 
-Semantic indexing writes deterministic local documents that map back to canonical chunk ids. This keeps MinSync/vector search from redefining chat boundaries.
+Semantic indexing writes local documents and a local vector index that map back to canonical chunk ids. Vector search never redefines chat boundaries.
 
 ## Search
 
@@ -75,22 +77,20 @@ Semantic indexing writes deterministic local documents that map back to canonica
 
 `katok search bm25` uses SQLite FTS5 BM25 ranking over the same chunk archive.
 
-`katok index` uses MinSync with a LanceDB vector store and a loopback Jina/TEI-compatible embedding server by default. The default model id is `tei:jinaai/jina-embeddings-v4` with a 2048-dimensional vector store. Use `jinaai/jina-embeddings-v3` only as a documented fallback if v4 cannot be served acceptably on the user's Mac.
+`katok index` uses an in-process local embedder by default: `embeddinggemma-300m-q4` through `fastembed`/ONNX Runtime. The first run downloads the model artifact into the Hugging Face / fastembed cache, then later runs reuse the local cache. No Python process, TEI server, Jina server, or local HTTP endpoint is required.
 
-Example local semantic config:
+Example semantic config:
 
 ```toml
-embedder_model = "tei:jinaai/jina-embeddings-v4"
-embedder_base_url = "http://127.0.0.1:8080"
+embedder_model = "embeddinggemma-300m-q4"
 embedding_batch_size = 64
-vector_dimension = 2048
-minsync_dir = "semantic"
-allow_remote_embeddings = false
+vector_dimension = 768
+semantic_dir = "semantic"
 ```
 
-For synthetic tests and offline CLI checks, `KATOK_EMBEDDER=mock katok index --json` keeps using the deterministic mock bridge. Remote embedding endpoints are rejected unless `allow_remote_embeddings = true` is set explicitly.
+For synthetic tests and offline CLI checks, `KATOK_EMBEDDER=mock katok index --json` keeps using the deterministic mock bridge. `KATOK_EMBEDDER=local-test` exercises the local vector-index path with deterministic vectors and no model download.
 
-Remote embedding or LLM APIs are not enabled by default and must be explicit opt-in.
+Remote embedding endpoints are not supported by the CLI path. Stale `embedder_base_url` or `allow_remote_embeddings` config is rejected so `katok index` stays zero-config and local by default.
 
 ## Privacy
 
@@ -106,7 +106,7 @@ Generated stores are ignored by git and should live under a user-only data direc
 
 ## Related Projects
 
-Relevant public projects found during the planning survey:
+Relevant public projects found during the planning survey. These are references only; the active semantic path uses the local SQLite vector store described above.
 
 - `silver-flight-group/kakaocli`: macOS local DB read/search/sync CLI.
 - `JungHoonGhae/openkakao-cli`: local DB read/search plus LOCO-oriented flows.
@@ -115,8 +115,6 @@ Relevant public projects found during the planning survey:
 - `sanggubot/doppelganger-gpt`: KakaoTalk txt to Chroma example.
 - `uoneway/kakaotalk_msg_preprocessor`: exported txt parser.
 - `claudianus/kakaotalk-chat-analyzer`: CSV export to anonymized HTML report.
-- `NomaDamas/MinSync`: Rust manifest-based incremental vector DB indexing CLI using LanceDB and local TEI support.
-
 No complete project was found that continuously turns the macOS KakaoTalk local DB into a private local archive plus keyword, BM25, and semantic chunk search.
 
 ## Development

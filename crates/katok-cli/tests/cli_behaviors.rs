@@ -69,7 +69,7 @@ fn cli_indexes_and_searches_fixture_when_using_data_dir() {
 }
 
 #[test]
-fn cli_reports_semantic_index_states_when_embedder_is_missing_or_mocked() {
+fn cli_reports_semantic_index_states_when_embedder_is_local_test_or_mocked() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let data_dir = dir.path();
     let fixture = format!(
@@ -123,6 +123,7 @@ fn cli_reports_semantic_index_states_when_embedder_is_missing_or_mocked() {
 
     Command::cargo_bin("katok")
         .expect("katok binary")
+        .env("KATOK_EMBEDDER", "local-test")
         .args([
             "--data-dir",
             data_dir.to_str().expect("utf8 path"),
@@ -130,9 +131,9 @@ fn cli_reports_semantic_index_states_when_embedder_is_missing_or_mocked() {
             "--json",
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "local embedding server unavailable",
+        .success()
+        .stdout(predicate::str::contains(
+            "\"embedder\": \"embeddinggemma/local-test\"",
         ));
 
     Command::cargo_bin("katok")

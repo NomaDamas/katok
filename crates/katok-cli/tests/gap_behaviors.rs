@@ -79,12 +79,12 @@ fn cli_handles_plan_gap_edges_when_exercised() {
 
     Command::cargo_bin("katok")
         .expect("katok binary")
+        .env("KATOK_EMBEDDER", "local-test")
         .args(["--data-dir", data_dir, "index", "--json"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "local embedding server unavailable",
-        ));
+        .success()
+        .stdout(predicate::str::contains("\"vectorstore\": \"local\""))
+        .stdout(predicate::str::contains("embeddinggemma/local-test"));
 
     Command::cargo_bin("katok")
         .expect("katok binary")
@@ -93,7 +93,7 @@ fn cli_handles_plan_gap_edges_when_exercised() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"written_documents\": 2"))
-        .stdout(predicate::str::contains("jinaai/jina-embeddings-v4"));
+        .stdout(predicate::str::contains("embeddinggemma-300m-q4"));
 
     Command::cargo_bin("katok")
         .expect("katok binary")
@@ -141,6 +141,7 @@ fn cli_splits_group_gap_and_reports_doctor_checks_when_used() {
 
     Command::cargo_bin("katok")
         .expect("katok binary")
+        .env("HOME", dir.path())
         .args(["--data-dir", data_dir, "doctor", "--json"])
         .assert()
         .success()
