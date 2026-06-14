@@ -92,7 +92,8 @@ fn cli_handles_plan_gap_edges_when_exercised() {
         .args(["--data-dir", data_dir, "index", "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"written_documents\": 2"))
+        .stdout(predicate::str::contains("\"written_documents\": 1"))
+        .stdout(predicate::str::contains("window_"))
         .stdout(predicate::str::contains("embeddinggemma-300m-q4"));
 
     Command::cargo_bin("katok")

@@ -48,6 +48,23 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             parent_chunk_id TEXT NOT NULL,
             PRIMARY KEY(child_chunk_id, parent_chunk_id)
         );
+        CREATE TABLE IF NOT EXISTS parent_chunks (
+            parent_id TEXT PRIMARY KEY,
+            account_hash TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            chat_name TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT NOT NULL,
+            text TEXT NOT NULL,
+            message_count INTEGER NOT NULL,
+            child_count INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS parent_chunk_children (
+            parent_id TEXT NOT NULL,
+            chunk_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            PRIMARY KEY(parent_id, chunk_id)
+        );
         CREATE TABLE IF NOT EXISTS reply_edges (
             child_message_id TEXT NOT NULL,
             parent_message_id TEXT NOT NULL,

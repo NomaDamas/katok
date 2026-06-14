@@ -1,4 +1,4 @@
-use crate::{archive::Archive, search::hydrate_hits, types::SearchHit, Error, Result};
+use crate::{archive::Archive, search::hydrate_parent_hits, types::SearchHit, Error, Result};
 use std::{fs, io::Write, path::Path};
 
 use super::{document_path, semantic_source_dir};
@@ -12,12 +12,12 @@ pub struct SemanticDocument {
 pub fn planned_semantic_documents(archive: &Archive, dir: &Path) -> Result<Vec<SemanticDocument>> {
     let dir = semantic_source_dir(dir);
     archive
-        .all_chunks()?
+        .all_parent_chunks()?
         .into_iter()
-        .map(|chunk| {
+        .map(|parent| {
             Ok(SemanticDocument {
-                path: document_path(&dir, &chunk.chunk_id),
-                chunk_id: chunk.chunk_id,
+                path: document_path(&dir, &parent.parent_id),
+                chunk_id: parent.parent_id,
             })
         })
         .collect()
@@ -33,26 +33,33 @@ pub fn write_semantic_documents(archive: &Archive, dir: &Path) -> Result<usize> 
 
 pub(crate) fn write_semantic_documents_plain(archive: &Archive, dir: &Path) -> Result<usize> {
     let dir = semantic_source_dir(dir);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(Error::Io)?;
+    }
     crate::paths::ensure_private_dir(&dir)?;
-    let chunks = archive.all_chunks()?;
-    for chunk in &chunks {
-        let path = document_path(&dir, &chunk.chunk_id);
+    let parents = archive.all_parent_chunks()?;
+    for parent in &parents {
+        let path = document_path(&dir, &parent.parent_id);
         let mut file = fs::File::create(&path).map_err(Error::Io)?;
-        writeln!(file, "chunk_id: {}", chunk.chunk_id).map_err(Error::Io)?;
-        writeln!(file, "chat_id: {}", chunk.chat_id).map_err(Error::Io)?;
-        writeln!(file, "sender_nickname: {}", chunk.sender_nickname).map_err(Error::Io)?;
-        writeln!(file, "time_range: {}..{}", chunk.started_at, chunk.ended_at)
-            .map_err(Error::Io)?;
+        writeln!(file, "parent_id: {}", parent.parent_id).map_err(Error::Io)?;
+        writeln!(file, "unit: parent_window").map_err(Error::Io)?;
+        writeln!(file, "chat_id: {}", parent.chat_id).map_err(Error::Io)?;
         writeln!(
             file,
-            "parent_chunk_ids: {}",
-            chunk.parent_chunk_ids.join(",")
+            "time_range: {}..{}",
+            parent.started_at, parent.ended_at
+        )
+        .map_err(Error::Io)?;
+        writeln!(
+            file,
+            "child_chunk_ids: {}",
+            parent.child_chunk_ids.join(",")
         )
         .map_err(Error::Io)?;
         writeln!(file, "---").map_err(Error::Io)?;
-        writeln!(file, "{}", chunk.text).map_err(Error::Io)?;
+        writeln!(file, "{}", parent.text).map_err(Error::Io)?;
     }
-    Ok(chunks.len())
+    Ok(parents.len())
 }
 
 pub fn semantic_search(
@@ -101,7 +108,7 @@ pub fn semantic_search_with_snippet(
         .map(|(_, id)| id)
         .take(limit)
         .collect::<Vec<_>>();
-    hydrate_hits(archive, ids, "semantic", query, snippet_length)
+    hydrate_parent_hits(archive, ids, "semantic", query, snippet_length)
 }
 
 fn chunk_id_from_path(path: &Path) -> Result<String> {

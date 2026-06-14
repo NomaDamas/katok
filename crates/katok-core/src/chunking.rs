@@ -4,6 +4,11 @@ use crate::{
 };
 use sha2::{Digest, Sha256};
 
+mod parent;
+
+use parent::build_parent_windows;
+pub use parent::{DEFAULT_PARENT_WINDOW_MAX_CHARS, DEFAULT_PARENT_WINDOW_SECONDS};
+
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkSettings {
     pub group_gap_seconds: i64,
@@ -26,8 +31,9 @@ pub fn rebuild_chunks(archive: &Archive) -> Result<usize> {
 pub fn rebuild_chunks_with_settings(archive: &Archive, settings: ChunkSettings) -> Result<usize> {
     let messages = archive.raw_messages()?;
     let drafts = build_chunks(&messages, settings)?;
+    let parents = build_parent_windows(&drafts)?;
     let count = drafts.len();
-    archive.replace_chunks(&drafts)?;
+    archive.replace_chunks(&drafts, &parents)?;
     Ok(count)
 }
 

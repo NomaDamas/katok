@@ -1,5 +1,6 @@
 use crate::{
-    archive::Archive, config::KatokConfig, search::hydrate_hits, types::SearchHit, Error, Result,
+    archive::Archive, config::KatokConfig, search::hydrate_parent_hits, types::SearchHit, Error,
+    Result,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -21,6 +22,7 @@ pub struct SemanticIndexReport {
     pub embedded_texts: usize,
     pub embedder: &'static str,
     pub vectorstore: &'static str,
+    pub semantic_units: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,25 +42,25 @@ pub async fn index_semantic_live(
 ) -> Result<SemanticIndexReport> {
     crate::paths::ensure_private_dir(dir)?;
     let written = write_semantic_documents_plain(archive, dir)?;
-    let chunks = archive.all_chunks()?;
-    let seen_token = semantic_seen_token(&chunks);
+    let parents = archive.all_parent_chunks()?;
+    let seen_token = semantic_seen_token(&parents);
     let store = LocalVectorStore::open(&dir.join(STORE_DIR), usize::from(config.vector_dimension))?;
     let mut embedder = create_embedder(config)?;
     let mut pending = Vec::new();
 
-    for chunk in chunks {
-        let hash = content_hash(&chunk.text);
-        let heading_path = format!("{} / {}", chunk.chat_name, chunk.sender_nickname);
-        match store.fetch(&chunk.chunk_id)? {
+    for parent in parents {
+        let hash = content_hash(&parent.text);
+        let heading_path = format!("{} / parent window", parent.chat_name);
+        match store.fetch(&parent.parent_id)? {
             Some(stored) if stored.content_hash == hash => {
                 store.mark_seen(&stored.chunk_id, &seen_token, &heading_path)?;
             }
             Some(_) | None => pending.push(PendingChunk {
-                chunk_id: chunk.chunk_id,
+                chunk_id: parent.parent_id,
                 content_hash: hash,
                 seen_token: seen_token.clone(),
                 heading_path,
-                text: chunk.text,
+                text: parent.text,
             }),
         }
     }
@@ -75,6 +77,7 @@ pub async fn index_semantic_live(
         embedded_texts,
         embedder: embedder.id(),
         vectorstore: "local",
+        semantic_units: "parent_windows",
     })
 }
 
@@ -92,21 +95,16 @@ pub async fn semantic_search_live_with_config(
         return Err(Error::SemanticIndexMissing);
     }
     let cursor = load_cursor(dir)?;
-    let store = LocalVectorStore::open(&dir.join(STORE_DIR), usize::from(config.vector_dimension))?;
     let mut embedder = create_embedder(config)?;
-    if cursor.embedder_id != embedder.id() {
-        return Err(Error::Embedding(format!(
-            "semantic index was built with {}; re-run katok index",
-            cursor.embedder_id
-        )));
-    }
+    validate_cursor(&cursor, embedder.id())?;
+    let store = LocalVectorStore::open(&dir.join(STORE_DIR), usize::from(config.vector_dimension))?;
     let vector = embedder.embed_query(query)?;
     let ids = store
         .search(&vector, limit)?
         .into_iter()
         .map(|hit| hit.chunk_id)
         .collect::<Vec<_>>();
-    hydrate_hits(archive, ids, "semantic", query, config.snippet_length)
+    hydrate_parent_hits(archive, ids, "semantic", query, config.snippet_length)
 }
 
 #[derive(Debug, Clone)]
@@ -168,10 +166,32 @@ fn load_cursor(dir: &Path) -> Result<SemanticCursor> {
     serde_json::from_slice(&content).map_err(Error::Json)
 }
 
-fn semantic_seen_token(chunks: &[crate::types::Chunk]) -> String {
+fn validate_cursor(cursor: &SemanticCursor, embedder_id: &str) -> Result<()> {
+    if cursor.source_id != SOURCE_ID {
+        return stale_index_error("source", &cursor.source_id, SOURCE_ID);
+    }
+    if cursor.chunk_schema_id != CHUNK_SCHEMA_ID {
+        return stale_index_error("schema", &cursor.chunk_schema_id, CHUNK_SCHEMA_ID);
+    }
+    if cursor.vectorstore != "local" {
+        return stale_index_error("vectorstore", &cursor.vectorstore, "local");
+    }
+    if cursor.embedder_id != embedder_id {
+        return stale_index_error("embedder", &cursor.embedder_id, embedder_id);
+    }
+    Ok(())
+}
+
+fn stale_index_error(field: &str, actual: &str, expected: &str) -> Result<()> {
+    Err(Error::Embedding(format!(
+        "semantic index {field} is {actual}, expected {expected}; re-run katok index"
+    )))
+}
+
+fn semantic_seen_token(chunks: &[crate::types::ParentChunk]) -> String {
     let mut material = String::new();
     for chunk in chunks {
-        material.push_str(&chunk.chunk_id);
+        material.push_str(&chunk.parent_id);
         material.push('\0');
         material.push_str(&content_hash(&chunk.text));
         material.push('\0');

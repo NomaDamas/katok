@@ -1,4 +1,4 @@
-use crate::cli::{ChunkCommand, Commands, SearchCommand, SourceCommand};
+use crate::cli::{Commands, SearchCommand, SourceCommand};
 use crate::commands::source_adapter::adapter_for_source;
 use crate::support::{dependency_status, print_payload};
 use anyhow::{Context, Result};
@@ -14,6 +14,7 @@ use katok_core::{
 };
 use std::path::{Path, PathBuf};
 
+mod chunk_commands;
 mod source_adapter;
 
 pub(crate) fn run(
@@ -35,7 +36,7 @@ pub(crate) fn run(
             json,
         } => run_index(full, dry_run, json, &config, &archive_path, &semantic_dir),
         Commands::Search { command } => run_search(command, &config, &archive_path, &semantic_dir),
-        Commands::Chunk { command } => run_chunk(command, &archive_path),
+        Commands::Chunk { command } => chunk_commands::run(command, &archive_path),
         Commands::Source { command } => run_source(command, &config, &data_dir),
         Commands::Chunks { chat, json } => run_chunks(&chat, json, &archive_path),
         Commands::WipeIndex { yes, json } => run_wipe_index(yes, json, &semantic_dir),
@@ -144,7 +145,8 @@ fn run_index(
             "embedded_texts": report.embedded_texts,
             "documents": documents,
             "embedder": report.embedder,
-            "vectorstore": report.vectorstore
+            "vectorstore": report.vectorstore,
+            "semantic_units": report.semantic_units
         });
         return print_payload(json, &payload);
     };
@@ -155,7 +157,8 @@ fn run_index(
         "written_documents": written,
         "embedding_calls": if dry_run { 0 } else { chunks.len() },
         "documents": documents,
-        "embedder": config.embedder_model
+        "embedder": config.embedder_model,
+        "semantic_units": "parent_windows"
     });
     print_payload(json, &payload)
 }
@@ -204,30 +207,6 @@ fn run_search(
                     .context("semantic search")?
             };
             print_payload(json, &hits)
-        }
-    }
-}
-
-fn run_chunk(command: ChunkCommand, archive_path: &Path) -> Result<()> {
-    let archive = Archive::open(archive_path).context("open archive")?;
-    match command {
-        ChunkCommand::Get {
-            chunk_id,
-            include_message_ids,
-            redact,
-            json,
-        } => {
-            let mut chunk = archive
-                .get_chunk(&chunk_id)
-                .context("get chunk")?
-                .with_context(|| format!("chunk not found: {chunk_id}"))?;
-            if redact {
-                chunk.text = "[redacted]".to_string();
-            }
-            if !include_message_ids {
-                chunk.message_ids.clear();
-            }
-            print_payload(json, &chunk)
         }
     }
 }

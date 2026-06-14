@@ -63,9 +63,17 @@ fn cli_honors_configured_semantic_dir_when_indexing() {
         .assert()
         .success();
 
-    assert!(data_dir
-        .join("custom-semantic/source/chunks/chunk_2aeac4db0a04ceb2.md")
-        .exists());
+    let document_dir = data_dir.join("custom-semantic/source/chunks");
+    let documents = std::fs::read_dir(document_dir)
+        .expect("read semantic docs")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect semantic docs");
+    assert_eq!(documents.len(), 1);
+    assert!(documents[0]
+        .file_name()
+        .to_str()
+        .expect("utf8 filename")
+        .starts_with("window_"));
 }
 
 #[test]

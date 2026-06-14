@@ -89,6 +89,16 @@ pub(crate) enum ChunkCommand {
         #[arg(long)]
         json: bool,
     },
+    Context {
+        chunk_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Parent {
+        chunk_id: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
