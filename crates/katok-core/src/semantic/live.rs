@@ -1,28 +1,36 @@
 use crate::{
     archive::Archive, config::KatokConfig, search::hydrate_hits, types::SearchHit, Error, Result,
 };
-use minsync::{
-    config::Config as MinSyncConfig,
-    embedder::{create_embedder, Embedder},
-    id::{compute_doc_id, content_hash},
-    state::Cursor,
-    vectorstore::{create_vectorstore, Document, DocumentUpdate, Filter, VectorStore},
-};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 use super::{
-    chunk_id_from_minsync_path, endpoint::validate_embedding_endpoint, minsync_chunk_path,
-    mock::write_semantic_documents_plain, CHUNK_SCHEMA_ID, CHUNK_TYPE, SOURCE_ID,
+    embedder::create_embedder,
+    mock::write_semantic_documents_plain,
+    store::{LocalVectorStore, VectorUpsert},
+    CHUNK_SCHEMA_ID, SOURCE_ID,
 };
 
 pub const STORE_DIR: &str = "store";
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SemanticIndexReport {
     pub written_documents: usize,
     pub embedding_calls: usize,
     pub embedded_texts: usize,
+    pub embedder: &'static str,
     pub vectorstore: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemanticCursor {
+    source_id: String,
+    last_synced_at: String,
+    seen_token: String,
+    chunk_schema_id: String,
+    embedder_id: String,
+    vectorstore: String,
 }
 
 pub async fn index_semantic_live(
@@ -30,69 +38,43 @@ pub async fn index_semantic_live(
     dir: &Path,
     config: &KatokConfig,
 ) -> Result<SemanticIndexReport> {
-    validate_embedding_endpoint(config)?;
     crate::paths::ensure_private_dir(dir)?;
     let written = write_semantic_documents_plain(archive, dir)?;
-    let minsync_config = minsync_config(config);
-    minsync_config
-        .save(&dir.join("config.toml"))
-        .map_err(to_katok_error)?;
-
-    let embedder = create_embedder(&minsync_config).map_err(to_katok_error)?;
-    crate::paths::ensure_private_dir(&dir.join(STORE_DIR))?;
-    let mut store =
-        create_vectorstore(&minsync_config, &dir.join(STORE_DIR)).map_err(to_katok_error)?;
     let chunks = archive.all_chunks()?;
     let seen_token = semantic_seen_token(&chunks);
-    let mut docs_to_embed = Vec::new();
-    let mut updates = Vec::new();
+    let store = LocalVectorStore::open(&dir.join(STORE_DIR), usize::from(config.vector_dimension))?;
+    let mut embedder = create_embedder(config)?;
+    let mut pending = Vec::new();
 
     for chunk in chunks {
-        let path = minsync_chunk_path(&chunk.chunk_id);
         let hash = content_hash(&chunk.text);
-        let id = compute_doc_id(SOURCE_ID, &path, CHUNK_SCHEMA_ID, CHUNK_TYPE, &hash, 0);
-        if store
-            .fetch(std::slice::from_ref(&id))
-            .map_err(to_katok_error)?
-            .is_empty()
-        {
-            docs_to_embed.push(Document {
-                id,
-                embedding: Vec::new(),
-                text: chunk.text,
-                source_id: SOURCE_ID.to_string(),
-                path,
-                chunk_schema_id: CHUNK_SCHEMA_ID.to_string(),
-                chunk_type: CHUNK_TYPE.to_string(),
-                heading_path: format!("{} / {}", chunk.chat_name, chunk.sender_nickname),
+        let heading_path = format!("{} / {}", chunk.chat_name, chunk.sender_nickname);
+        match store.fetch(&chunk.chunk_id)? {
+            Some(stored) if stored.content_hash == hash => {
+                store.mark_seen(&stored.chunk_id, &seen_token, &heading_path)?;
+            }
+            Some(_) | None => pending.push(PendingChunk {
+                chunk_id: chunk.chunk_id,
                 content_hash: hash,
                 seen_token: seen_token.clone(),
-            });
-        } else {
-            updates.push(DocumentUpdate {
-                id,
-                seen_token: seen_token.clone(),
-                path,
-                heading_path: format!("{} / {}", chunk.chat_name, chunk.sender_nickname),
-            });
+                heading_path,
+                text: chunk.text,
+            }),
         }
     }
 
-    if !updates.is_empty() {
-        store.update(&updates).map_err(to_katok_error)?;
-    }
-    let embedded_texts = docs_to_embed.len();
-    let embedding_calls =
-        embed_and_upsert(&*embedder, &mut *store, &mut docs_to_embed, config).await?;
-    delete_stale(&mut *store, &seen_token)?;
-    store.flush().map_err(to_katok_error)?;
+    let embedded_texts = pending.len();
+    let batch_size = config.embedding_batch_size.max(1);
+    let embedding_calls = embed_pending(&store, &mut *embedder, &pending, batch_size)?;
+    store.delete_stale(&seen_token)?;
     save_cursor(dir, &seen_token, embedder.id())?;
 
     Ok(SemanticIndexReport {
         written_documents: written,
         embedding_calls,
         embedded_texts,
-        vectorstore: "lancedb",
+        embedder: embedder.id(),
+        vectorstore: "local",
     })
 }
 
@@ -109,89 +91,81 @@ pub async fn semantic_search_live_with_config(
     if !dir.join("cursor.json").exists() {
         return Err(Error::SemanticIndexMissing);
     }
-    validate_embedding_endpoint(config)?;
-    let minsync_config = minsync_config(config);
-    let embedder = create_embedder(&minsync_config).map_err(to_katok_error)?;
-    let store =
-        create_vectorstore(&minsync_config, &dir.join(STORE_DIR)).map_err(to_katok_error)?;
-    let vector = embedder.embed_query(query).await.map_err(to_katok_error)?;
-    let hits = store
-        .query(
-            &vector,
-            Some(&Filter::Eq("source_id".to_string(), SOURCE_ID.to_string())),
-            limit,
-        )
-        .map_err(to_katok_error)?;
-    let ids = hits
+    let cursor = load_cursor(dir)?;
+    let store = LocalVectorStore::open(&dir.join(STORE_DIR), usize::from(config.vector_dimension))?;
+    let mut embedder = create_embedder(config)?;
+    if cursor.embedder_id != embedder.id() {
+        return Err(Error::Embedding(format!(
+            "semantic index was built with {}; re-run katok index",
+            cursor.embedder_id
+        )));
+    }
+    let vector = embedder.embed_query(query)?;
+    let ids = store
+        .search(&vector, limit)?
         .into_iter()
-        .filter_map(|hit| chunk_id_from_minsync_path(&hit.path))
+        .map(|hit| hit.chunk_id)
         .collect::<Vec<_>>();
     hydrate_hits(archive, ids, "semantic", query, config.snippet_length)
 }
 
-async fn embed_and_upsert(
-    embedder: &dyn Embedder,
-    store: &mut dyn VectorStore,
-    docs: &mut [Document],
-    config: &KatokConfig,
+#[derive(Debug, Clone)]
+struct PendingChunk {
+    chunk_id: String,
+    content_hash: String,
+    seen_token: String,
+    heading_path: String,
+    text: String,
+}
+
+fn embed_pending(
+    store: &LocalVectorStore,
+    embedder: &mut dyn super::embedder::SemanticEmbedder,
+    pending: &[PendingChunk],
+    batch_size: usize,
 ) -> Result<usize> {
-    if docs.is_empty() {
-        return Ok(0);
+    for batch in pending.chunks(batch_size) {
+        let texts = batch
+            .iter()
+            .map(|chunk| chunk.text.clone())
+            .collect::<Vec<_>>();
+        let embeddings = embedder.embed(&texts, batch_size)?;
+        if embeddings.len() != batch.len() {
+            return Err(Error::Embedding(format!(
+                "expected {} embeddings, got {}",
+                batch.len(),
+                embeddings.len()
+            )));
+        }
+        for (chunk, vector) in batch.iter().zip(embeddings) {
+            store.upsert(&VectorUpsert {
+                chunk_id: chunk.chunk_id.clone(),
+                content_hash: chunk.content_hash.clone(),
+                seen_token: chunk.seen_token.clone(),
+                heading_path: chunk.heading_path.clone(),
+                vector,
+            })?;
+        }
     }
-    let texts = docs.iter().map(|doc| doc.text.clone()).collect::<Vec<_>>();
-    let embeddings = embedder.embed(&texts).await.map_err(to_katok_error)?;
-    if embeddings.len() != docs.len() {
-        return Err(Error::MinSync(format!(
-            "expected {} embeddings, got {}",
-            docs.len(),
-            embeddings.len()
-        )));
-    }
-    for (doc, embedding) in docs.iter_mut().zip(embeddings) {
-        doc.embedding = embedding;
-    }
-    store.upsert(docs).map_err(to_katok_error)?;
-    Ok(docs.len().div_ceil(config.embedding_batch_size.max(1)))
-}
-
-fn minsync_config(config: &KatokConfig) -> MinSyncConfig {
-    let mut minsync_config = MinSyncConfig::default_for(SOURCE_ID);
-    minsync_config.collection.path = STORE_DIR.to_string();
-    minsync_config.chunker.id = "katok-canonical".to_string();
-    minsync_config.embedder.id = config.embedder_model.clone();
-    minsync_config.embedder.base_url = Some(config.embedder_base_url.clone());
-    minsync_config.embedder.batch_size = config.embedding_batch_size;
-    minsync_config.vectorstore.id = "lancedb".to_string();
-    let mut options = toml::map::Map::new();
-    options.insert(
-        "dimension".to_string(),
-        toml::Value::Integer(i64::from(config.vector_dimension)),
-    );
-    minsync_config.vectorstore.options = toml::Value::Table(options);
-    minsync_config
-}
-
-fn delete_stale(store: &mut dyn VectorStore, seen_token: &str) -> Result<()> {
-    store
-        .delete_by_filter(&Filter::And(vec![
-            Filter::Eq("source_id".to_string(), SOURCE_ID.to_string()),
-            Filter::Neq("seen_token".to_string(), seen_token.to_string()),
-        ]))
-        .map_err(to_katok_error)?;
-    Ok(())
+    Ok(pending.len().div_ceil(batch_size))
 }
 
 fn save_cursor(dir: &Path, seen_token: &str, embedder_id: &str) -> Result<()> {
-    Cursor {
+    let cursor = SemanticCursor {
         source_id: SOURCE_ID.to_string(),
         last_synced_at: chrono::Utc::now().to_rfc3339(),
-        manifest_hash: seen_token.to_string(),
+        seen_token: seen_token.to_string(),
         chunk_schema_id: CHUNK_SCHEMA_ID.to_string(),
         embedder_id: embedder_id.to_string(),
-        collection_path: STORE_DIR.to_string(),
-    }
-    .save(&dir.join("cursor.json"))
-    .map_err(to_katok_error)
+        vectorstore: "local".to_string(),
+    };
+    let json = serde_json::to_vec_pretty(&cursor).map_err(Error::Json)?;
+    std::fs::write(dir.join("cursor.json"), json).map_err(Error::Io)
+}
+
+fn load_cursor(dir: &Path) -> Result<SemanticCursor> {
+    let content = std::fs::read(dir.join("cursor.json")).map_err(Error::Io)?;
+    serde_json::from_slice(&content).map_err(Error::Json)
 }
 
 fn semantic_seen_token(chunks: &[crate::types::Chunk]) -> String {
@@ -205,15 +179,7 @@ fn semantic_seen_token(chunks: &[crate::types::Chunk]) -> String {
     content_hash(&material)
 }
 
-fn to_katok_error(error: minsync::error::MinSyncError) -> Error {
-    match error {
-        minsync::error::MinSyncError::NeverSynced => Error::SemanticIndexMissing,
-        minsync::error::MinSyncError::Embedding(message)
-            if message.contains("Connection refused")
-                || message.contains("error sending request") =>
-        {
-            Error::EmbedderUnavailable
-        }
-        other => Error::MinSync(other.to_string()),
-    }
+fn content_hash(content: &str) -> String {
+    let digest = Sha256::digest(content.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }

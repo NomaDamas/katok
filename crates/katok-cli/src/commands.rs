@@ -81,7 +81,9 @@ fn run_doctor(
         "embedder": {
             "model": config.embedder_model,
             "dimension": config.vector_dimension,
-            "mode": std::env::var("KATOK_EMBEDDER").unwrap_or_else(|_| "local".to_string())
+            "provider": "local",
+            "mode": std::env::var("KATOK_EMBEDDER").unwrap_or_else(|_| "local".to_string()),
+            "endpoint": null
         }
     });
     print_payload(json, &payload)
@@ -141,7 +143,7 @@ fn run_index(
             "embedding_calls": report.embedding_calls,
             "embedded_texts": report.embedded_texts,
             "documents": documents,
-            "embedder": config.embedder_model,
+            "embedder": report.embedder,
             "vectorstore": report.vectorstore
         });
         return print_payload(json, &payload);

@@ -20,6 +20,8 @@ pub enum Error {
         line: usize,
         source: serde_json::Error,
     },
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("timestamp parse error: {0}")]
     Time(#[from] chrono::ParseError),
     #[error("home directory is unavailable")]
@@ -38,12 +40,10 @@ pub enum Error {
     UnsupportedSource(String),
     #[error("config parse error: {0}")]
     Config(#[from] toml::de::Error),
-    #[error("local embedding server unavailable; start TEI on http://localhost:8080 or set KATOK_EMBEDDER=mock for synthetic QA")]
+    #[error("local embedder unavailable: {0}")]
+    Embedding(String),
+    #[error("local embedding model unavailable; set KATOK_EMBEDDER=local-test for synthetic QA")]
     EmbedderUnavailable,
-    #[error("remote embedding endpoints are disabled by default; use a loopback Jina/TEI endpoint or set allow_remote_embeddings = true")]
-    RemoteEmbeddingEndpoint,
-    #[error("MinSync error: {0}")]
-    MinSync(String),
     #[error("{0}")]
     Kakaocli(String),
     #[error("KakaoTalk reader error: {0}")]

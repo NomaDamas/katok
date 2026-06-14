@@ -19,10 +19,10 @@ fn main() -> Result<()> {
     };
     ensure_private_dir(&data_dir).context("create private data directory")?;
     let archive_path = data_dir.join("archive.sqlite3");
-    let semantic_dir = if config.minsync_dir.is_absolute() {
-        config.minsync_dir.clone()
+    let semantic_dir = if config.semantic_dir.is_absolute() {
+        config.semantic_dir.clone()
     } else {
-        data_dir.join(&config.minsync_dir)
+        data_dir.join(&config.semantic_dir)
     };
 
     commands::run(cli.command, config, data_dir, archive_path, semantic_dir)
