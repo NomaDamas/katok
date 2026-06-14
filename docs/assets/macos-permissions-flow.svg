@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-label="katok macOS first-run permission flow">
+  <rect width="1280" height="720" fill="#f7f7f2"/>
+  <text x="80" y="90" font-family="Arial, sans-serif" font-size="48" font-weight="700" fill="#111">katok macOS first-run setup</text>
+  <text x="80" y="135" font-family="Arial, sans-serif" font-size="24" fill="#444">One command opens the right panes, then verifies local KakaoTalk search.</text>
+
+  <g transform="translate(80 210)">
+    <rect width="260" height="180" rx="8" fill="#ffffff" stroke="#222" stroke-width="2"/>
+    <text x="28" y="55" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#111">1. Open panes</text>
+    <text x="28" y="100" font-family="Arial, sans-serif" font-size="20" fill="#333">Full Disk Access</text>
+    <text x="28" y="132" font-family="Arial, sans-serif" font-size="20" fill="#333">Accessibility</text>
+  </g>
+
+  <path d="M365 300H480" stroke="#111" stroke-width="6" marker-end="url(#arrow)"/>
+
+  <g transform="translate(505 210)">
+    <rect width="260" height="180" rx="8" fill="#ffffff" stroke="#222" stroke-width="2"/>
+    <text x="28" y="55" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#111">2. Toggle app</text>
+    <text x="28" y="100" font-family="Arial, sans-serif" font-size="20" fill="#333">User enables the</text>
+    <text x="28" y="132" font-family="Arial, sans-serif" font-size="20" fill="#333">terminal in macOS</text>
+  </g>
+
+  <path d="M790 300H905" stroke="#111" stroke-width="6" marker-end="url(#arrow)"/>
+
+  <g transform="translate(930 210)">
+    <rect width="270" height="180" rx="8" fill="#ffffff" stroke="#222" stroke-width="2"/>
+    <text x="28" y="55" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#111">3. Verify</text>
+    <text x="28" y="100" font-family="Arial, sans-serif" font-size="20" fill="#333">doctor, sync, index,</text>
+    <text x="28" y="132" font-family="Arial, sans-serif" font-size="20" fill="#333">semantic search</text>
+  </g>
+
+  <rect x="80" y="500" width="1120" height="86" rx="8" fill="#202124"/>
+  <text x="112" y="555" font-family="Menlo, Consolas, monospace" font-size="28" fill="#fff">scripts/katok-macos-setup.sh</text>
+
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 z" fill="#111"/>
+    </marker>
+  </defs>
+</svg>
