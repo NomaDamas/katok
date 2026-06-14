@@ -12,7 +12,7 @@ pub mod reader;
 
 use std::path::PathBuf;
 
-use katok_core::{Error, Result};
+use crate::{Error, Result};
 
 pub use auth::{probe_status, AuthOptions, ProbeStatus, ResolvedAuth};
 pub use reader::{ChatRecord, ReaderOutput};
@@ -29,7 +29,7 @@ pub fn read_kakao_with_options(options: &AuthOptions) -> Result<ReaderOutput> {
     reader::read_databases(&resolved.database_files, resolved.user_id, &resolved.uuid)
 }
 
-/// Resolve the default home directory, mirroring `katok_core::paths`.
+/// Resolve the default home directory, mirroring `crate::paths`.
 pub fn default_home() -> Result<PathBuf> {
     dirs::home_dir().ok_or(Error::HomeDirUnavailable)
 }

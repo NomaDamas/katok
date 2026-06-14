@@ -1,5 +1,5 @@
-use katok_core::{types::RawMessage, Result};
-use katok_kakao::{AuthOptions, ReaderOutput};
+use crate::kakao::{AuthOptions, ReaderOutput};
+use crate::{types::RawMessage, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -44,7 +44,7 @@ impl SourceAdapter for FixtureAdapter {
     }
 
     fn messages(&self) -> Result<Vec<RawMessage>> {
-        katok_core::fixture::read_fixture(&self.path)
+        crate::fixture::read_fixture(&self.path)
     }
 }
 
@@ -73,7 +73,7 @@ impl MacosAdapter {
         if let Some(output) = self.cached.get() {
             return Ok(output.clone());
         }
-        let output = katok_kakao::read_kakao_with_options(&self.options)?;
+        let output = crate::kakao::read_kakao_with_options(&self.options)?;
         // Ignore a lost race: `get_or_init` is not fallible-friendly, so set and
         // re-read; on the (single-threaded) common path this stores our value.
         let _ = self.cached.set(output.clone());
@@ -119,7 +119,7 @@ where
     T: serde::de::DeserializeOwned,
 {
     serde_json::from_slice(bytes).map_err(|err| {
-        katok_core::Error::Kakaocli(format!("kakaocli {command} returned invalid JSON: {err}"))
+        crate::Error::Kakaocli(format!("kakaocli {command} returned invalid JSON: {err}"))
     })
 }
 
@@ -129,7 +129,7 @@ fn run_kakaocli(command: &str) -> Result<Vec<u8>> {
         .arg("--json")
         .output()
         .map_err(|err| {
-            katok_core::Error::Kakaocli(format!(
+            crate::Error::Kakaocli(format!(
                 "kakaocli not found on PATH; install kakaocli or ensure it is executable ({err})"
             ))
         })?;
@@ -141,7 +141,7 @@ fn run_kakaocli(command: &str) -> Result<Vec<u8>> {
         } else {
             detail
         };
-        return Err(katok_core::Error::Kakaocli(format!(
+        return Err(crate::Error::Kakaocli(format!(
             "kakaocli {command} failed ({}): {detail}",
             output.status
         )));

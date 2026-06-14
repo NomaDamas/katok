@@ -1,0 +1,225 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the leading v"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: macos-14
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+            tag="v${version}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            version="${tag#v}"
+          fi
+          manifest_version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          test "${version}" = "${manifest_version}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Test
+        env:
+          KATOK_EMBEDDER: local-test
+        run: cargo test --all-targets
+
+      - name: Verify package
+        run: cargo publish --dry-run
+
+      - name: Verify release config
+        run: python3 scripts/verify_release_config.py
+
+  binaries:
+    name: Build ${{ matrix.target }}
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-13
+            target: x86_64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --target "${{ matrix.target }}"
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="katok-${{ needs.validate.outputs.version }}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/katok" "dist/${name}/katok"
+          cp README.md "dist/${name}/README.md"
+          cp scripts/katok-macos-setup.sh "dist/${name}/katok-macos-setup.sh"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          shasum -a 256 "dist/${name}.tar.gz" > "dist/${name}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: katok-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  publish-crate:
+    name: Publish crate
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
+
+  github-release:
+    name: Publish GitHub release
+    needs:
+      - validate
+      - binaries
+      - publish-crate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ needs.validate.outputs.tag }}" dist/* \
+            --repo "${{ github.repository }}" \
+            --title "katok ${{ needs.validate.outputs.version }}" \
+            --notes "Install with cargo install katok or brew install NomaDamas/katok/katok."
+
+  update-homebrew:
+    name: Update Homebrew tap
+    needs:
+      - validate
+      - github-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tap
+        uses: actions/checkout@v4
+        with:
+          repository: NomaDamas/homebrew-katok
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Update formula
+        working-directory: tap
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p Formula
+          source_url="https://github.com/NomaDamas/katok/archive/refs/tags/${TAG}.tar.gz"
+          sha256="$(curl -fsSL "${source_url}" | shasum -a 256 | awk '{print $1}')"
+          cat > Formula/katok.rb <<RUBY
+          class Katok < Formula
+            desc "Local-first KakaoTalk memory archive and search CLI for macOS"
+            homepage "https://github.com/NomaDamas/katok"
+            url "${source_url}"
+            sha256 "${sha256}"
+            license "MIT"
+
+            depends_on "rust" => :build
+
+            def install
+              system "cargo", "install", *std_cargo_args
+            end
+
+            def caveats
+              <<~EOS
+                For native KakaoTalk sync, grant your terminal Full Disk Access:
+                  System Settings > Privacy & Security > Full Disk Access
+
+                Then run:
+                  katok doctor --json
+              EOS
+            end
+
+            test do
+              assert_match "katok", shell_output("#{bin}/katok --help")
+            end
+          end
+          RUBY
+
+      - name: Commit formula
+        working-directory: tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/katok.rb
+          git commit -m "feat(katok): update to ${TAG}" || exit 0
+          git push

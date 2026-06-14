@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use katok_adapters::{FixtureAdapter, KakaocliAdapter, MacosAdapter, SourceAdapter};
+use katok::adapters::{FixtureAdapter, KakaocliAdapter, MacosAdapter, SourceAdapter};
 use std::path::{Path, PathBuf};
 
 pub(super) fn adapter_for_source(
@@ -14,7 +14,7 @@ pub(super) fn adapter_for_source(
         }
         "kakaocli" => Ok(Box::new(KakaocliAdapter)),
         "macos" | "kakao" => {
-            let home = katok_kakao::default_home().context("resolve home directory")?;
+            let home = katok::kakao::default_home().context("resolve home directory")?;
             Ok(Box::new(MacosAdapter::new(home, data_dir.to_path_buf())))
         }
         other => anyhow::bail!("unsupported source adapter: {other}"),

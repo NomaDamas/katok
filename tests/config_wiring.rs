@@ -118,6 +118,6 @@ fn cli_honors_configured_snippet_length_when_searching() {
 
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/kakao")
+        .join("tests/fixtures/kakao")
         .join(name)
 }

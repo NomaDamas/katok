@@ -2,7 +2,7 @@ use crate::cli::{Commands, SearchCommand, SourceCommand};
 use crate::commands::source_adapter::adapter_for_source;
 use crate::support::{dependency_status, print_payload};
 use anyhow::{Context, Result};
-use katok_core::{
+use katok::{
     archive::Archive,
     chunking::{rebuild_chunks_with_settings, ChunkSettings},
     config::KatokConfig,
@@ -52,7 +52,7 @@ fn run_doctor(
 ) -> Result<()> {
     let macos_probe = match dirs::home_dir() {
         Some(home) => {
-            let status = katok_kakao::probe_status(&home, &data_dir);
+            let status = katok::kakao::probe_status(&home, &data_dir);
             serde_json::json!({
                 "app_installed": status.app_installed,
                 "container_present": status.container_present,
