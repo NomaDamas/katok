@@ -4,11 +4,6 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release, without the leading v"
-        required: true
 
 permissions:
   contents: write
@@ -32,13 +27,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            version="${{ inputs.version }}"
-            tag="v${version}"
-          else
-            tag="${GITHUB_REF_NAME}"
-            version="${tag#v}"
-          fi
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
           manifest_version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
           test "${version}" = "${manifest_version}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
