@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use katok_kakao::{auth, derive, AuthOptions};
+use katok::kakao::{auth, derive, AuthOptions};
 use rusqlite::Connection;
 
 const TEST_UUID: &str = "42C34717-27C3-538C-81E4-8B568287C7A0";
@@ -118,7 +118,7 @@ fn reads_synthetic_kakao_db_and_maps_model() {
         uuid_override: Some(TEST_UUID.to_string()),
         max_user_id: 0,
     };
-    let output = katok_kakao::read_kakao_with_options(&options).expect("read kakao");
+    let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
 
     // Empty-text message (logId 23) is filtered out → 5 messages remain.
     assert_eq!(output.messages.len(), 5);
@@ -243,7 +243,7 @@ fn malformed_message_row_is_skipped_not_fatal() {
         uuid_override: Some(TEST_UUID.to_string()),
         max_user_id: 0,
     };
-    let output = katok_kakao::read_kakao_with_options(&options).expect("read kakao");
+    let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
 
     // The malformed row is dropped; both good rows survive.
     let ids: Vec<&str> = output
@@ -278,7 +278,7 @@ fn discovers_and_reads_db_suffixed_file() {
         uuid_override: Some(TEST_UUID.to_string()),
         max_user_id: 0,
     };
-    let output = katok_kakao::read_kakao_with_options(&options).expect("read kakao");
+    let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
 
     // Same content as the bare-named DB: 5 mapped messages, 2 chats.
     assert_eq!(output.messages.len(), 5);

@@ -112,6 +112,6 @@ fn live_semantic_cli_rejects_stale_remote_embedding_endpoint_config() {
 
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/kakao")
+        .join("tests/fixtures/kakao")
         .join(name)
 }

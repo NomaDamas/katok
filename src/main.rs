@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use cli::Cli;
-use katok_core::{
+use katok::{
     config::KatokConfig,
     paths::{default_data_dir, ensure_private_dir},
 };

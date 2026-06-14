@@ -17,9 +17,9 @@ use std::process::Command;
 use rayon::prelude::*;
 use sha2::{Digest, Sha512};
 
-use crate::derive;
-use crate::reader::probe_database;
-use katok_core::{Error, Result};
+use super::derive;
+use super::reader::probe_database;
+use crate::{Error, Result};
 
 const EMPTY_ACCOUNT_HASH: &str = "31bca02094eb78126a517b206a88c73cfa9ec6f704c7030d18212cace820f025\
 f00bf0ea68dbf3f3a5436ca63b53bf7bf80ad8d5de7d8359d0b7fed9dbc3ab99";
@@ -357,7 +357,7 @@ fn read_katok_cache(path: &Path) -> Option<(i64, String)> {
 /// Persist only `{user_id, uuid}` at 0600 for the next run.
 fn persist_katok_cache(path: &Path, user_id: i64, uuid: &str) {
     if let Some(parent) = path.parent() {
-        if katok_core::paths::ensure_private_dir(parent).is_err() {
+        if crate::paths::ensure_private_dir(parent).is_err() {
             return;
         }
     }

@@ -2,10 +2,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn fixture_path(name: &str) -> String {
-    format!(
-        "{}/../../tests/fixtures/kakao/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    )
+    format!("{}/tests/fixtures/kakao/{name}", env!("CARGO_MANIFEST_DIR"))
 }
 
 #[test]
@@ -73,7 +70,7 @@ fn cli_reports_semantic_index_states_when_embedder_is_local_test_or_mocked() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let data_dir = dir.path();
     let fixture = format!(
-        "{}/../../tests/fixtures/kakao/replies.jsonl",
+        "{}/tests/fixtures/kakao/replies.jsonl",
         env!("CARGO_MANIFEST_DIR")
     );
 
@@ -156,7 +153,7 @@ fn cli_lists_gap_chunks_and_applies_chunk_output_flags() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let data_dir = dir.path();
     let fixture = format!(
-        "{}/../../tests/fixtures/kakao/group_gap.jsonl",
+        "{}/tests/fixtures/kakao/group_gap.jsonl",
         env!("CARGO_MANIFEST_DIR")
     );
 

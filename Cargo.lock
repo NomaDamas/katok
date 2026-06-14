@@ -1240,61 +1240,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "katok-adapters"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "katok-core",
- "katok-kakao",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "katok-cli"
+name = "katok"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
- "clap",
- "dirs",
- "katok-adapters",
- "katok-core",
- "katok-kakao",
- "predicates",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "katok-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "dirs",
- "fastembed",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "toml",
-]
-
-[[package]]
-name = "katok-kakao"
-version = "0.1.0"
-dependencies = [
  "base64 0.22.1",
  "chrono",
+ "clap",
  "dirs",
+ "fastembed",
  "hmac",
- "katok-core",
  "pbkdf2",
+ "predicates",
  "rayon",
  "rusqlite",
  "serde",
@@ -1302,6 +1260,9 @@ dependencies = [
  "sha1",
  "sha2",
  "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

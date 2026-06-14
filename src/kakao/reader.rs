@@ -9,8 +9,8 @@ use chrono::{TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
-use katok_core::types::RawMessage;
-use katok_core::{Error, Result};
+use crate::types::RawMessage;
+use crate::{Error, Result};
 
 /// Output of reading one or more KakaoTalk databases.
 #[derive(Debug, Clone)]
@@ -346,7 +346,7 @@ pub fn read_databases(
     user_id: i64,
     uuid: &str,
 ) -> Result<ReaderOutput> {
-    let key = crate::derive::secure_key(user_id, uuid);
+    let key = super::derive::secure_key(user_id, uuid);
     let account = account_hash(user_id);
 
     // Open each DB once. A DB that fails to open is skipped with a one-line

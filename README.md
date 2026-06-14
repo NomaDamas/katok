@@ -28,12 +28,21 @@ katok wipe-index --yes --json
 
 ## 빠른 시작 (macOS 카카오톡)
 
+Homebrew:
+
 ```bash
-cargo build --workspace
-cargo run -p katok-cli -- doctor --json
-cargo run -p katok-cli -- sync --source macos --json
-cargo run -p katok-cli -- index --json
-cargo run -p katok-cli -- search semantic "검색어" --json
+brew install NomaDamas/katok/katok
+katok doctor --json
+katok sync --source macos --json
+katok index --json
+katok search semantic "검색어" --json
+```
+
+Cargo:
+
+```bash
+cargo install katok
+katok doctor --json
 ```
 
 - 먼저 macOS 설정에서 터미널 앱에 **전체 디스크 접근 권한**을 주세요.
@@ -131,9 +140,10 @@ No complete project was found that continuously turns the macOS KakaoTalk local 
 
 ```bash
 cargo fmt --all -- --check
-cargo build --workspace
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo build
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
+python3 scripts/verify_release_config.py
 ```
 
 Do not add real KakaoTalk exports, SQLCipher keys, auth caches, embeddings, indexes, or local archives to this repository.

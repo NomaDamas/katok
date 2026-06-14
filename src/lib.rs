@@ -1,7 +1,9 @@
+pub mod adapters;
 pub mod archive;
 pub mod chunking;
 pub mod config;
 pub mod fixture;
+pub mod kakao;
 pub mod paths;
 pub mod search;
 pub mod semantic;
