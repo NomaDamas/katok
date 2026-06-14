@@ -57,8 +57,9 @@ def main() -> int:
         ),
         check(
             "release-tag-trigger",
-            re.search(r"tags:\s*\n\s+- \"v\*\"", release) is not None,
-            "Release workflow runs on v* tags",
+            re.search(r"tags:\s*\n\s+- \"v\*\"", release) is not None
+            and "workflow_dispatch" not in release,
+            "Release workflow runs only on v* tags",
         ),
         check(
             "crates-token",
