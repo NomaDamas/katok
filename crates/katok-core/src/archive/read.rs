@@ -28,6 +28,7 @@ impl Archive {
                     ended_at: row.get(5)?,
                     message_count: row.get::<_, i64>(6)? as usize,
                     parent_chunk_ids: Vec::new(),
+                    window_parent_ids: Vec::new(),
                 })
             })
             .map_err(Error::Sql)?
@@ -36,6 +37,7 @@ impl Archive {
         rows.into_iter()
             .map(|mut summary| {
                 summary.parent_chunk_ids = self.parent_chunks(&summary.chunk_id)?;
+                summary.window_parent_ids = self.window_parent_ids(&summary.chunk_id)?;
                 Ok(summary)
             })
             .collect()
@@ -61,6 +63,7 @@ impl Archive {
                         message_count: row.get::<_, i64>(7)? as usize,
                         message_ids: Vec::new(),
                         parent_chunk_ids: Vec::new(),
+                        window_parent_ids: Vec::new(),
                     })
                 },
             )
@@ -71,6 +74,7 @@ impl Archive {
             Some(mut chunk) => {
                 chunk.message_ids = self.chunk_messages(chunk_id)?;
                 chunk.parent_chunk_ids = self.parent_chunks(chunk_id)?;
+                chunk.window_parent_ids = self.window_parent_ids(chunk_id)?;
                 Ok(Some(chunk))
             }
             None => Ok(None),
@@ -125,7 +129,7 @@ impl Archive {
         Ok(rows)
     }
 
-    fn parent_chunks(&self, chunk_id: &str) -> Result<Vec<String>> {
+    pub(super) fn parent_chunks(&self, chunk_id: &str) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
             .prepare(

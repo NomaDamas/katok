@@ -11,8 +11,8 @@ pub use mock::{
     write_semantic_documents, SemanticDocument,
 };
 
-pub(crate) const CHUNK_SCHEMA_ID: &str = "katok-kakao-chunk-v1";
-pub(crate) const SOURCE_ID: &str = "katok-kakao-chunks";
+pub(crate) const CHUNK_SCHEMA_ID: &str = "katok-kakao-parent-window-v1";
+pub(crate) const SOURCE_ID: &str = "katok-kakao-parent-windows";
 
 pub fn semantic_source_dir(root: &std::path::Path) -> std::path::PathBuf {
     root.join("source").join("chunks")

@@ -81,6 +81,7 @@ pub(crate) fn hydrate_hits(
             let chunk = archive.get_chunk(&id)?.ok_or(Error::MissingChunk(id))?;
             Ok(SearchHit {
                 ranker,
+                unit: "micro_chunk",
                 rank: idx + 1,
                 chunk_id: chunk.chunk_id,
                 chat_name: chunk.chat_name,
@@ -90,6 +91,38 @@ pub(crate) fn hydrate_hits(
                 snippet: snippet(&chunk.text, query, snippet_length),
                 score: 1.0 / ((idx + 1) as f64),
                 parent_chunk_ids: chunk.parent_chunk_ids,
+                child_chunk_ids: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn hydrate_parent_hits(
+    archive: &Archive,
+    ids: Vec<String>,
+    ranker: &'static str,
+    query: &str,
+    snippet_length: usize,
+) -> Result<Vec<SearchHit>> {
+    ids.into_iter()
+        .enumerate()
+        .map(|(idx, id)| {
+            let parent = archive
+                .get_parent_chunk(&id)?
+                .ok_or(Error::MissingChunk(id))?;
+            Ok(SearchHit {
+                ranker,
+                unit: "parent_window",
+                rank: idx + 1,
+                chunk_id: parent.parent_id,
+                chat_name: parent.chat_name,
+                sender_nickname: "multiple".to_string(),
+                started_at: parent.started_at,
+                ended_at: parent.ended_at,
+                snippet: snippet(&parent.text, query, snippet_length),
+                score: 1.0 / ((idx + 1) as f64),
+                parent_chunk_ids: Vec::new(),
+                child_chunk_ids: parent.child_chunk_ids,
             })
         })
         .collect()

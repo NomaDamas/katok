@@ -12,6 +12,19 @@ pub struct ChunkDraft {
 }
 
 #[derive(Debug, Clone)]
+pub struct ParentChunkDraft {
+    pub parent_id: String,
+    pub account_hash: String,
+    pub chat_id: String,
+    pub chat_name: String,
+    pub started_at: String,
+    pub ended_at: String,
+    pub text: String,
+    pub message_count: usize,
+    pub child_chunk_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct StoredMessage {
     pub account_hash: String,
     pub chat_id: String,

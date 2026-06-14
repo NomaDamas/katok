@@ -1,4 +1,4 @@
-use super::{Archive, ChunkDraft};
+use super::{Archive, ChunkDraft, ParentChunkDraft};
 use crate::{
     types::{RawMessage, SyncReport},
     Error, Result,
@@ -21,10 +21,16 @@ impl Archive {
         })
     }
 
-    pub fn replace_chunks(&self, chunks: &[ChunkDraft]) -> Result<()> {
+    pub fn replace_chunks(
+        &self,
+        chunks: &[ChunkDraft],
+        parents: &[ParentChunkDraft],
+    ) -> Result<()> {
         self.conn
             .execute_batch(
                 "DELETE FROM chunk_parent_refs;
+             DELETE FROM parent_chunk_children;
+             DELETE FROM parent_chunks;
              DELETE FROM chunk_messages;
              DELETE FROM chunks;
              DELETE FROM chunks_fts;",
@@ -32,6 +38,9 @@ impl Archive {
             .map_err(Error::Sql)?;
         for chunk in chunks {
             self.insert_chunk(chunk)?;
+        }
+        for parent in parents {
+            self.insert_parent_chunk(parent)?;
         }
         self.rebuild_parent_refs()
     }
@@ -115,6 +124,38 @@ impl Archive {
                     "INSERT INTO chunk_messages(chunk_id, message_id, ordinal)
                  VALUES (?1, ?2, ?3)",
                     params![chunk.chunk_id, message_id, idx],
+                )
+                .map_err(Error::Sql)?;
+        }
+        Ok(())
+    }
+
+    fn insert_parent_chunk(&self, parent: &ParentChunkDraft) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO parent_chunks
+             (parent_id, account_hash, chat_id, chat_name, started_at,
+              ended_at, text, message_count, child_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    parent.parent_id,
+                    parent.account_hash,
+                    parent.chat_id,
+                    parent.chat_name,
+                    parent.started_at,
+                    parent.ended_at,
+                    parent.text,
+                    parent.message_count,
+                    parent.child_chunk_ids.len()
+                ],
+            )
+            .map_err(Error::Sql)?;
+        for (idx, chunk_id) in parent.child_chunk_ids.iter().enumerate() {
+            self.conn
+                .execute(
+                    "INSERT INTO parent_chunk_children(parent_id, chunk_id, ordinal)
+                 VALUES (?1, ?2, ?3)",
+                    params![parent.parent_id, chunk_id, idx],
                 )
                 .map_err(Error::Sql)?;
         }

@@ -3,11 +3,12 @@ use rusqlite::Connection;
 use std::path::Path;
 
 mod model;
+mod parent;
 mod read;
 mod schema;
 mod write;
 
-pub use model::{ChunkDraft, StoredMessage};
+pub use model::{ChunkDraft, ParentChunkDraft, StoredMessage};
 
 pub struct Archive {
     pub(super) conn: Connection,

@@ -21,6 +21,8 @@ katok search keyword "보고서" --json
 katok search bm25 "보고서" --json
 katok search semantic "회의 보고서" --json
 katok chunk get <chunk-id> --json
+katok chunk context <chunk-id> --json
+katok chunk parent <chunk-id> --json
 katok wipe-index --yes --json
 ```
 
@@ -68,10 +70,14 @@ Requirements:
 - A large time gap starts a new chunk even when the nickname is unchanged.
 - Default thresholds are 10 minutes for group chats and 30 minutes for direct chats.
 - Reply metadata is stored as parent chunk references when the parent message is indexed.
+- Window parent chunks group canonical chunks from the same `chat_id` across speakers when they occur within 5 minutes of each other.
+- Window parent chunks are capped to fit the local EmbeddingGemma indexing context; overlarge windows split before indexing.
 - `katok search ...` returns minimal snippets and metadata.
 - `katok chunk get <chunk-id>` is the explicit command for full chunk content.
+- `katok chunk context <chunk-id>` returns the immediate previous/next canonical chunk in the same chat plus the window parent chunk.
+- `katok chunk parent <chunk-id>` returns the larger window parent chunk for quick child-to-parent navigation.
 
-Semantic indexing writes local documents and a local vector index that map back to canonical chunk ids. Vector search never redefines chat boundaries.
+Semantic indexing writes local documents and a local vector index for window parent chunks. Search hits include `unit = "parent_window"` and `child_chunk_ids`, so agents can search at the larger context level and then jump back to exact canonical chunks.
 
 ## Search
 
@@ -80,6 +86,8 @@ Semantic indexing writes local documents and a local vector index that map back 
 `katok search bm25` uses SQLite FTS5 BM25 ranking over the same chunk archive.
 
 `katok index` uses an in-process local embedder by default: `embeddinggemma-300m-q4` through `fastembed`/ONNX Runtime. The first run downloads the model artifact into the Hugging Face / fastembed cache, then later runs reuse the local cache. No Python process, TEI server, Jina server, or local HTTP endpoint is required.
+
+Semantic search indexes window parent chunks, not individual micro chunks. Keyword and BM25 search still operate over canonical micro chunks. This keeps exact lookup small while semantic search has enough conversational context across speakers.
 
 Example semantic config:
 
