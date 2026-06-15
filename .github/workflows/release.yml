@@ -67,8 +67,6 @@ jobs:
         include:
           - runner: macos-14
             target: aarch64-apple-darwin
-          - runner: macos-13
-            target: x86_64-apple-darwin
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -169,17 +167,18 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p Formula
-          source_url="https://github.com/NomaDamas/katok/archive/refs/tags/${TAG}.tar.gz"
-          sha256="$(curl -fsSL "${source_url}" | shasum -a 256 | awk '{print $1}')"
+          revision="$(git rev-list -n 1 "${TAG}")"
           cat > Formula/katok.rb <<RUBY
           class Katok < Formula
             desc "Local-first KakaoTalk memory archive and search CLI for macOS"
             homepage "https://github.com/NomaDamas/katok"
-            url "${source_url}"
-            sha256 "${sha256}"
+            url "git@github.com:NomaDamas/katok.git",
+              tag:      "${TAG}",
+              revision: "${revision}"
             license "MIT"
 
             depends_on "rust" => :build
+            depends_on arch: :arm64
 
             def install
               system "cargo", "install", *std_cargo_args
