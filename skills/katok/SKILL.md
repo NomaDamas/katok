@@ -18,7 +18,10 @@ Use the `katok` CLI as the only execution surface. This skill stays thin: it che
 ## Commands
 
 ```bash
+export PATH="$HOME/.cargo/bin:$PATH"       # use when katok is not found after cargo install
 katok doctor --json
+katok permissions macos                   # opens Full Disk Access settings
+katok permissions macos --accessibility   # also opens Accessibility settings
 katok doctor --macos-probe --json        # explicit macOS permission/app-data probe
 katok sync --source macos --json          # reads live macOS KakaoTalk (needs Full Disk Access)
 katok sync --json                         # uses source_adapter from config
@@ -41,13 +44,15 @@ KATOK_EMBEDDER=mock katok index --json
 
 ## Operating Pattern
 
-1. Run `katok doctor --json` before search to inspect freshness without triggering macOS app-data permission prompts.
-2. Inspect the `freshness` section from `doctor --json` before search.
-3. Run `katok sync --source macos --json` when `freshness.recommendation.sync_before_search` is `true`, when the user asks for recent messages, or when search freshness matters.
-4. Run `katok index --json` before semantic search when `freshness.recommendation.index_before_semantic_search` is `true` or after a sync that should affect vector search.
-5. Use `katok search keyword ...`, `katok search bm25 ...`, and `katok search semantic ...` for discovery.
-6. Use `katok chunk get ...` only for explicit retrieval.
-7. Run `katok doctor --macos-probe --json` only for setup or permission diagnostics, because it may trigger a macOS "access data from other apps" prompt.
+1. If `katok` is not found after install, run `export PATH="$HOME/.cargo/bin:$PATH"` and retry.
+2. If macOS permission setup is needed, run `katok permissions macos` so the user can grant Full Disk Access in System Settings.
+3. Run `katok doctor --json` before search to inspect freshness without triggering macOS app-data permission prompts.
+4. Inspect the `freshness` section from `doctor --json` before search.
+5. Run `katok sync --source macos --json` when `freshness.recommendation.sync_before_search` is `true`, when the user asks for recent messages, or when search freshness matters.
+6. Run `katok index --json` before semantic search when `freshness.recommendation.index_before_semantic_search` is `true` or after a sync that should affect vector search.
+7. Use `katok search keyword ...`, `katok search bm25 ...`, and `katok search semantic ...` for discovery.
+8. Use `katok chunk get ...` only for explicit retrieval.
+9. Run `katok doctor --macos-probe --json` only for setup or permission diagnostics, because it may trigger a macOS "access data from other apps" prompt.
 
 `--source macos` reads the live macOS KakaoTalk SQLCipher database locally in Rust; the terminal must have Full Disk Access to `~/Library/Containers/com.kakao.KakaoTalkMac/`.
 

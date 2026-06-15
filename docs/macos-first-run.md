@@ -2,7 +2,7 @@
 
 `katok`은 카카오톡 준비 상태를 자동으로 확인할 수 있지만, macOS는 CLI가 스스로 전체 디스크 접근 권한이나 손쉬운 사용 권한을 부여하는 것을 허용하지 않습니다. 설정 helper는 대신 아래 순서로 안내합니다.
 
-1. 필요한 시스템 설정 화면을 엽니다.
+1. `katok permissions macos`로 필요한 시스템 설정 화면을 엽니다.
 2. 현재 터미널 앱을 허용하도록 안내합니다.
 3. `katok doctor --macos-probe --json`으로 카카오톡 앱, 컨테이너, DB 접근 가능 여부를 확인합니다.
 4. `katok sync --source macos --json`으로 로컬 아카이브를 만듭니다.
@@ -19,6 +19,26 @@ scripts/katok-macos-setup.sh
 
 ```bash
 KATOK_BIN=target/debug/katok scripts/katok-macos-setup.sh
+```
+
+`katok: command not found`가 나오면 먼저 설치와 PATH를 확인합니다.
+
+```bash
+cargo install katok
+export PATH="$HOME/.cargo/bin:$PATH"
+katok permissions macos --accessibility
+```
+
+권한 설정 화면만 직접 열려면:
+
+```bash
+katok permissions macos
+```
+
+KakaoTalk UI 자동화까지 쓸 계획이면 손쉬운 사용 설정도 같이 엽니다.
+
+```bash
+katok permissions macos --accessibility
 ```
 
 ## 완전 자동화가 안 되는 이유

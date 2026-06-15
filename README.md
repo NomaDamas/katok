@@ -35,7 +35,27 @@ Cargo:
 cargo install katok
 ```
 
+Cargo로 설치했는데 `katok: command not found`가 나오면 현재 셸이 Cargo binary 경로를 못 보고 있는 상태입니다.
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+katok --help
+```
+
+영구 적용은 사용하는 셸 설정에 추가합니다.
+
+```bash
+echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
+exec zsh -l
+```
+
 처음 설치한 뒤에는 터미널에 전체 디스크 접근 권한을 주세요.
+
+```bash
+katok permissions macos
+```
+
+열린 System Settings에서 현재 사용하는 Terminal, iTerm, Codex 앱 또는 설치된 `katok` 실행 파일을 Full Disk Access에 추가하세요. macOS TCC 권한은 사용자가 시스템 설정에서 직접 허용해야 하므로 CLI가 자기 자신에게 권한을 영구 부여할 수는 없습니다.
 
 ```bash
 katok doctor --json
@@ -49,7 +69,7 @@ katok doctor --json
 katok doctor --macos-probe --json
 ```
 
-이 probe는 macOS가 "katok would like to access data from other apps" 권한 요청을 띄울 수 있습니다. 반복 요청을 줄이려면 System Settings > Privacy & Security > Full Disk Access에서 사용 중인 Terminal/iTerm/Codex 앱이나 설치된 `katok` 실행 파일을 허용하세요. CLI는 macOS TCC 권한을 스스로 영구 부여할 수 없습니다.
+이 probe는 macOS가 "katok would like to access data from other apps" 권한 요청을 띄울 수 있습니다. 반복 요청을 줄이려면 `katok permissions macos`로 System Settings를 연 뒤 사용 중인 Terminal/iTerm/Codex 앱이나 설치된 `katok` 실행 파일을 Full Disk Access에 허용하세요.
 
 권한 설정을 처음부터 안내받으려면:
 

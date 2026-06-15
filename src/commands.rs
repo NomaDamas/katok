@@ -1,4 +1,4 @@
-use crate::cli::{Commands, SearchCommand, SourceCommand};
+use crate::cli::{Commands, PermissionsCommand, SearchCommand, SourceCommand};
 use crate::commands::source_adapter::adapter_for_source;
 use crate::support::{dependency_status, print_payload};
 use anyhow::{Context, Result};
@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 mod chunk_commands;
 mod freshness;
 mod index_commands;
+mod permissions;
 mod source_adapter;
 
 pub(crate) fn run(
@@ -52,8 +53,19 @@ pub(crate) fn run(
         Commands::Search { command } => run_search(command, &config, &archive_path, &semantic_dir),
         Commands::Chunk { command } => chunk_commands::run(command, &archive_path),
         Commands::Source { command } => run_source(command, &config, &data_dir),
+        Commands::Permissions { command } => run_permissions(command),
         Commands::Chunks { chat, json } => run_chunks(&chat, json, &archive_path),
         Commands::WipeIndex { yes, json } => run_wipe_index(yes, json, &semantic_dir),
+    }
+}
+
+fn run_permissions(command: PermissionsCommand) -> Result<()> {
+    match command {
+        PermissionsCommand::Macos {
+            accessibility,
+            dry_run,
+            json,
+        } => permissions::open_macos(accessibility, dry_run, json),
     }
 }
 
