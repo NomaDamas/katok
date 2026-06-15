@@ -31,7 +31,8 @@ katok wipe-index --yes --json
 Homebrew:
 
 ```bash
-brew install NomaDamas/katok/katok
+brew tap NomaDamas/katok https://github.com/NomaDamas/katok
+brew install katok
 katok doctor --json
 katok sync --source macos --json
 katok index --json

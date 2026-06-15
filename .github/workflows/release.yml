@@ -145,7 +145,7 @@ jobs:
           gh release create "${{ needs.validate.outputs.tag }}" dist/* \
             --repo "${{ github.repository }}" \
             --title "katok ${{ needs.validate.outputs.version }}" \
-            --notes "Install with cargo install katok or brew install NomaDamas/katok/katok."
+            --notes "Install with cargo install katok or brew tap NomaDamas/katok https://github.com/NomaDamas/katok && brew install katok."
 
   update-homebrew:
     name: Update Homebrew tap
@@ -154,11 +154,10 @@ jobs:
       - github-release
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout tap
+      - name: Checkout tap branch
         uses: actions/checkout@v4
         with:
-          repository: NomaDamas/homebrew-katok
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          ref: main
           path: tap
 
       - name: Update formula
@@ -204,7 +203,6 @@ jobs:
       - name: Commit formula
         working-directory: tap
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           TAG: ${{ needs.validate.outputs.tag }}
         run: |
           set -euo pipefail

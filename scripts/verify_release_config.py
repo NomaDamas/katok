@@ -68,9 +68,11 @@ def main() -> int:
         ),
         check(
             "homebrew-tap",
-            "repository: NomaDamas/homebrew-katok" in release
-            and "HOMEBREW_TAP_TOKEN" in release,
-            "Release workflow updates the Homebrew tap with a dedicated token",
+            "repository: NomaDamas/homebrew-katok" not in release
+            and "HOMEBREW_TAP_TOKEN" not in release
+            and "ref: main" in release
+            and "path: tap" in release,
+            "Release workflow updates Formula/katok.rb in the same repository",
         ),
         check(
             "macos-artifacts",
