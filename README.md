@@ -26,12 +26,16 @@ katok chunk parent <chunk-id> --json
 katok wipe-index --yes --json
 ```
 
-## 빠른 시작 (macOS 카카오톡)
+## 빠른 시작 (Apple Silicon macOS 카카오톡)
+
+`katok` 0.1.x is packaged for Apple Silicon macOS. Intel macOS is not currently
+published because the local ONNX Runtime backend used by `fastembed` does not
+ship a compatible prebuilt `x86_64-apple-darwin` binary for this dependency set.
 
 Homebrew:
 
 ```bash
-brew tap NomaDamas/katok https://github.com/NomaDamas/katok
+brew tap NomaDamas/katok git@github.com:NomaDamas/katok.git
 brew install katok
 katok doctor --json
 katok sync --source macos --json

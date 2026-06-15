@@ -77,9 +77,8 @@ def main() -> int:
         check(
             "macos-artifacts",
             "aarch64-apple-darwin" in release
-            and "x86_64-apple-darwin" in release
             and "dist/*.tar.gz" in release,
-            "Release workflow builds macOS arm64 and x86_64 archives",
+            "Release workflow builds the supported Apple Silicon macOS archive",
         ),
         check(
             "formula-contract",
