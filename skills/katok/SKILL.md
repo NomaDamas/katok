@@ -41,10 +41,11 @@ KATOK_EMBEDDER=mock katok index --json
 ## Operating Pattern
 
 1. Run `katok doctor --json` when the user asks to set up or diagnose local KakaoTalk access.
-2. Run `katok sync --source macos --json` before search if the local archive may be stale.
-3. Run `katok index --json` before semantic search if vector search has not been built or may be stale.
-4. Use `katok search keyword ...`, `katok search bm25 ...`, and `katok search semantic ...` for discovery.
-5. Use `katok chunk get ...` only for explicit retrieval.
+2. Inspect the `freshness` section from `doctor --json` before search.
+3. Run `katok sync --source macos --json` when `freshness.recommendation.sync_before_search` is `true`, when the user asks for recent messages, or when search freshness matters.
+4. Run `katok index --json` before semantic search when `freshness.recommendation.index_before_semantic_search` is `true` or after a sync that should affect vector search.
+5. Use `katok search keyword ...`, `katok search bm25 ...`, and `katok search semantic ...` for discovery.
+6. Use `katok chunk get ...` only for explicit retrieval.
 
 `--source macos` reads the live macOS KakaoTalk SQLCipher database locally in Rust; the terminal must have Full Disk Access to `~/Library/Containers/com.kakao.KakaoTalkMac/`.
 

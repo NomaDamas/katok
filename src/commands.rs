@@ -7,14 +7,13 @@ use katok::{
     chunking::{rebuild_chunks_with_settings, ChunkSettings},
     config::KatokConfig,
     search::{bm25_search_with_snippet, keyword_search_with_snippet},
-    semantic::{
-        index_semantic_live, planned_semantic_documents, semantic_search_live_with_config,
-        semantic_search_with_snippet, write_semantic_documents,
-    },
+    semantic::{semantic_search_live_with_config, semantic_search_with_snippet},
 };
 use std::path::{Path, PathBuf};
 
 mod chunk_commands;
+mod freshness;
+mod index_commands;
 mod source_adapter;
 
 pub(crate) fn run(
@@ -34,7 +33,15 @@ pub(crate) fn run(
             full,
             dry_run,
             json,
-        } => run_index(full, dry_run, json, &config, &archive_path, &semantic_dir),
+        } => index_commands::run(
+            full,
+            dry_run,
+            json,
+            &config,
+            &archive_path,
+            &semantic_dir,
+            &data_dir,
+        ),
         Commands::Search { command } => run_search(command, &config, &archive_path, &semantic_dir),
         Commands::Chunk { command } => chunk_commands::run(command, &archive_path),
         Commands::Source { command } => run_source(command, &config, &data_dir),
@@ -68,6 +75,7 @@ fn run_doctor(
         "data_dir": data_dir,
         "archive": archive_path,
         "semantic_index": semantic_dir,
+        "freshness": freshness::load(&data_dir)?,
         "local_first": true,
         "macos": cfg!(target_os = "macos"),
         "source_adapter": {
@@ -110,57 +118,8 @@ fn run_sync(
         },
     )
     .context("rebuild chunks")?;
+    freshness::record_sync(data_dir, source, report.total_messages, report.chunks)?;
     print_payload(json, &report)
-}
-
-fn run_index(
-    full: bool,
-    dry_run: bool,
-    json: bool,
-    config: &KatokConfig,
-    archive_path: &Path,
-    semantic_dir: &Path,
-) -> Result<()> {
-    let archive = Archive::open(archive_path).context("open archive")?;
-    let chunks = archive.all_chunks().context("load chunks")?;
-    let documents = planned_semantic_documents(&archive, semantic_dir).context("plan documents")?;
-    let written = if dry_run {
-        0
-    } else if std::env::var("KATOK_EMBEDDER").unwrap_or_default() == "mock" {
-        write_semantic_documents(&archive, semantic_dir).context("write semantic documents")?
-    } else {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("create semantic runtime")?;
-        let report = runtime
-            .block_on(index_semantic_live(&archive, semantic_dir, config))
-            .context("index semantic documents")?;
-        let payload = serde_json::json!({
-            "full": full,
-            "dry_run": dry_run,
-            "candidate_chunks": chunks.len(),
-            "written_documents": report.written_documents,
-            "embedding_calls": report.embedding_calls,
-            "embedded_texts": report.embedded_texts,
-            "documents": documents,
-            "embedder": report.embedder,
-            "vectorstore": report.vectorstore,
-            "semantic_units": report.semantic_units
-        });
-        return print_payload(json, &payload);
-    };
-    let payload = serde_json::json!({
-        "full": full,
-        "dry_run": dry_run,
-        "candidate_chunks": chunks.len(),
-        "written_documents": written,
-        "embedding_calls": if dry_run { 0 } else { chunks.len() },
-        "documents": documents,
-        "embedder": config.embedder_model,
-        "semantic_units": "parent_windows"
-    });
-    print_payload(json, &payload)
 }
 
 fn run_search(

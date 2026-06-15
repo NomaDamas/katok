@@ -42,6 +42,7 @@ katok doctor --json
 ```
 
 `doctor`는 카카오톡 앱, 컨테이너, DB 파일 개수, 인증 캐시 여부만 확인합니다. 대화 내용은 출력하지 않습니다.
+또한 `freshness` 섹션에서 마지막 `sync`와 `index` 완료 시각을 보여줍니다.
 
 권한 설정을 처음부터 안내받으려면:
 
@@ -61,6 +62,8 @@ katok search keyword "계약서" --json
 katok search bm25 "지난주 미팅 자료" --json
 katok search semantic "최근에 논의한 세금 신고 일정" --json
 ```
+
+검색 최신성이 중요하면 검색 전에 항상 `katok doctor --json`의 `freshness`를 확인하세요. `sync_before_search`가 `true`이면 `katok sync --source macos --json`을 먼저 실행하고, `index_before_semantic_search`가 `true`이면 `katok index --json`을 실행한 뒤 semantic search를 사용합니다.
 
 검색 결과에서 더 넓은 맥락이 필요하면 chunk 명령을 사용합니다.
 
@@ -129,10 +132,13 @@ katok chunk get <chunk-id> --json
 
 권장 패턴:
 
-1. 처음에는 `katok search keyword`, `katok search bm25`, `katok search semantic`으로 후보를 좁힙니다.
-2. 사용자가 특정 결과를 열어 달라고 하거나 chunk id를 제공했을 때만 `katok chunk get`으로 원문을 봅니다.
-3. semantic search 결과의 `child_chunk_ids`에서 정확한 원문으로 이동할 때는 `katok chunk context`와 `katok chunk parent`를 사용합니다.
-4. skill은 결과를 요약만 하고, indexing logic이나 DB 해독 logic을 자체 구현하지 않습니다.
+1. 검색 전에 `katok doctor --json`의 `freshness`를 봅니다.
+2. `sync_before_search`가 `true`이거나 최신 대화가 중요하면 `katok sync --source macos --json`을 실행합니다.
+3. semantic search 전에 `index_before_semantic_search`가 `true`이면 `katok index --json`을 실행합니다.
+4. 처음에는 `katok search keyword`, `katok search bm25`, `katok search semantic`으로 후보를 좁힙니다.
+5. 사용자가 특정 결과를 열어 달라고 하거나 chunk id를 제공했을 때만 `katok chunk get`으로 원문을 봅니다.
+6. semantic search 결과의 `child_chunk_ids`에서 정확한 원문으로 이동할 때는 `katok chunk context`와 `katok chunk parent`를 사용합니다.
+7. skill은 결과를 요약만 하고, indexing logic이나 DB 해독 logic을 자체 구현하지 않습니다.
 
 ## macOS 소스 어댑터
 
@@ -166,6 +172,33 @@ katok chunk get <chunk-id> --json
 katok chunk context <chunk-id> --json
 katok chunk parent <chunk-id> --json
 katok wipe-index --yes --json
+```
+
+`doctor --json`의 freshness 예:
+
+```json
+{
+  "freshness": {
+    "last_sync": {
+      "completed_at": "2026-06-15T05:00:00Z",
+      "source": "macos",
+      "total_messages": 12345,
+      "chunks": 6789
+    },
+    "last_index": {
+      "completed_at": "2026-06-15T05:03:00Z",
+      "embedder": "embeddinggemma/local",
+      "vectorstore": "local",
+      "semantic_units": "parent_windows",
+      "embedded_texts": 42
+    },
+    "recommendation": {
+      "sync_before_search": false,
+      "index_before_semantic_search": false,
+      "reason": "archive and semantic index have completed at least once; re-run sync/index when freshness matters"
+    }
+  }
+}
 ```
 
 ## 개인정보와 로컬 파일
