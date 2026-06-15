@@ -16,6 +16,24 @@ fn cli_help_identifies_katok_when_invoked() {
 }
 
 #[test]
+fn cli_reports_macos_permission_panes_without_opening_settings_when_dry_run() {
+    let mut cmd = Command::cargo_bin("katok").expect("katok binary");
+    cmd.args([
+        "permissions",
+        "macos",
+        "--accessibility",
+        "--dry-run",
+        "--json",
+    ])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("full_disk_access"))
+    .stdout(predicate::str::contains("accessibility"))
+    .stdout(predicate::str::contains("\"opened\": false"))
+    .stdout(predicate::str::contains("Privacy_AllFiles"));
+}
+
+#[test]
 fn cli_indexes_and_searches_fixture_when_using_data_dir() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let data_dir = dir.path();

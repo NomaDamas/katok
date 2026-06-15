@@ -47,6 +47,10 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: SourceCommand,
     },
+    Permissions {
+        #[command(subcommand)]
+        command: PermissionsCommand,
+    },
     WipeIndex {
         #[arg(long)]
         yes: bool,
@@ -109,6 +113,18 @@ pub(crate) enum SourceCommand {
         #[arg(long)]
         source: Option<String>,
         path: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PermissionsCommand {
+    Macos {
+        #[arg(long)]
+        accessibility: bool,
+        #[arg(long)]
+        dry_run: bool,
         #[arg(long)]
         json: bool,
     },

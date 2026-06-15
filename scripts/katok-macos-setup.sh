@@ -12,14 +12,9 @@ if ! command -v "$KATOK_BIN" >/dev/null 2>&1; then
   fi
 fi
 
-echo "Opening Full Disk Access settings..."
-open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" || true
-echo "Enable your terminal app, then press Enter."
-read -r _
-
-echo "Opening Accessibility settings..."
-open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" || true
-echo "Enable your terminal app if you plan to use KakaoTalk UI automation, then press Enter."
+echo "Opening macOS permission settings..."
+"$KATOK_BIN" permissions macos --accessibility
+echo "Enable your terminal app for Full Disk Access. Enable Accessibility too if you plan to use KakaoTalk UI automation, then press Enter."
 read -r _
 
 echo "Checking KakaoTalk readiness..."
