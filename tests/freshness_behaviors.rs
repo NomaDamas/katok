@@ -24,6 +24,7 @@ fn cli_doctor_reports_sync_and_index_freshness_when_search_needs_updates() {
         .success()
         .stdout(predicate::str::contains("\"freshness\""))
         .stdout(predicate::str::contains("\"last_sync\": null"))
+        .stdout(predicate::str::contains("\"status\": \"not_checked\""))
         .stdout(predicate::str::contains("\"sync_before_search\": true"));
 
     Command::cargo_bin("katok")

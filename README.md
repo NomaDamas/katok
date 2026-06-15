@@ -41,8 +41,15 @@ cargo install katok
 katok doctor --json
 ```
 
-`doctor`는 카카오톡 앱, 컨테이너, DB 파일 개수, 인증 캐시 여부만 확인합니다. 대화 내용은 출력하지 않습니다.
+`doctor`는 기본값으로 로컬 인덱스 freshness만 확인하므로 macOS 권한 prompt를 띄우지 않습니다.
 또한 `freshness` 섹션에서 마지막 `sync`와 `index` 완료 시각을 보여줍니다.
+카카오톡 앱, 컨테이너, DB 파일 개수, 인증 캐시 여부까지 확인하려면 아래처럼 명시적으로 실행합니다.
+
+```bash
+katok doctor --macos-probe --json
+```
+
+이 probe는 macOS가 "katok would like to access data from other apps" 권한 요청을 띄울 수 있습니다. 반복 요청을 줄이려면 System Settings > Privacy & Security > Full Disk Access에서 사용 중인 Terminal/iTerm/Codex 앱이나 설치된 `katok` 실행 파일을 허용하세요. CLI는 macOS TCC 권한을 스스로 영구 부여할 수 없습니다.
 
 권한 설정을 처음부터 안내받으려면:
 
@@ -63,7 +70,7 @@ katok search bm25 "지난주 미팅 자료" --json
 katok search semantic "최근에 논의한 세금 신고 일정" --json
 ```
 
-검색 최신성이 중요하면 검색 전에 항상 `katok doctor --json`의 `freshness`를 확인하세요. `sync_before_search`가 `true`이면 `katok sync --source macos --json`을 먼저 실행하고, `index_before_semantic_search`가 `true`이면 `katok index --json`을 실행한 뒤 semantic search를 사용합니다.
+검색 최신성이 중요하면 검색 전에 항상 `katok doctor --json`의 `freshness`를 확인하세요. 이 기본 doctor는 macOS app data probe를 실행하지 않으므로 권한 prompt 없이 사용할 수 있습니다. `sync_before_search`가 `true`이면 `katok sync --source macos --json`을 먼저 실행하고, `index_before_semantic_search`가 `true`이면 `katok index --json`을 실행한 뒤 semantic search를 사용합니다.
 
 검색 결과에서 더 넓은 맥락이 필요하면 chunk 명령을 사용합니다.
 
@@ -172,6 +179,12 @@ katok chunk get <chunk-id> --json
 katok chunk context <chunk-id> --json
 katok chunk parent <chunk-id> --json
 katok wipe-index --yes --json
+```
+
+권한 진단이 필요할 때만:
+
+```bash
+katok doctor --macos-probe --json
 ```
 
 `doctor --json`의 freshness 예:

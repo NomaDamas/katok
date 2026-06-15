@@ -145,7 +145,8 @@ fn cli_splits_group_gap_and_reports_doctor_checks_when_used() {
         .success()
         .stdout(predicate::str::contains("source_adapter"))
         .stdout(predicate::str::contains("embedder"))
-        .stdout(predicate::str::contains("macos"));
+        .stdout(predicate::str::contains("macos"))
+        .stdout(predicate::str::contains("\"status\": \"not_checked\""));
 
     Command::cargo_bin("katok")
         .expect("katok binary")

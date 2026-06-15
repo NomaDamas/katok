@@ -16,6 +16,8 @@ pub(crate) struct Cli {
 pub(crate) enum Commands {
     Doctor {
         #[arg(long)]
+        macos_probe: bool,
+        #[arg(long)]
         json: bool,
     },
     Sync {
