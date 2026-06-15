@@ -7,7 +7,7 @@ if ! command -v "$KATOK_BIN" >/dev/null 2>&1; then
   if [ -x "target/debug/katok" ]; then
     KATOK_BIN="target/debug/katok"
   else
-    echo "katok binary not found. Run brew install NomaDamas/katok/katok, cargo install katok, or set KATOK_BIN=/path/to/katok." >&2
+    echo "katok binary not found. Run brew tap NomaDamas/katok https://github.com/NomaDamas/katok && brew install katok, cargo install katok, or set KATOK_BIN=/path/to/katok." >&2
     exit 127
   fi
 fi
