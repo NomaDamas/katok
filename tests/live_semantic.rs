@@ -22,6 +22,7 @@ fn live_semantic_doctor_json_reports_embeddinggemma_q4_local_defaults_when_uncon
         .stdout(predicate::str::contains("\"dimension\": 768"))
         .stdout(predicate::str::contains("\"provider\": \"local\""))
         .stdout(predicate::str::contains("\"endpoint\": null"))
+        .stdout(predicate::str::contains("\"status\": \"not_checked\""))
         .stdout(predicate::str::contains("jina").not())
         .stdout(predicate::str::contains("tei").not())
         .stdout(predicate::str::contains("2048").not());

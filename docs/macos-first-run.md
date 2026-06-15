@@ -4,7 +4,7 @@
 
 1. 필요한 시스템 설정 화면을 엽니다.
 2. 현재 터미널 앱을 허용하도록 안내합니다.
-3. `katok doctor --json`으로 카카오톡 앱, 컨테이너, DB 접근 가능 여부를 확인합니다.
+3. `katok doctor --macos-probe --json`으로 카카오톡 앱, 컨테이너, DB 접근 가능 여부를 확인합니다.
 4. `katok sync --source macos --json`으로 로컬 아카이브를 만듭니다.
 5. `katok index --json`으로 EmbeddingGemma 벡터 인덱스를 만듭니다.
 6. semantic smoke search를 실행합니다.
@@ -27,12 +27,13 @@ Apple TCC 권한 시스템은 전체 디스크 접근 권한과 손쉬운 사용
 
 ## 기대 결과
 
-권한을 켠 뒤 `katok doctor --json`은 대략 아래 상태를 보여야 합니다.
+권한을 켠 뒤 `katok doctor --macos-probe --json`은 대략 아래 상태를 보여야 합니다.
 
 ```json
 {
   "source_adapter": {
     "macos": {
+      "status": "checked",
       "app_installed": true,
       "container_present": true,
       "db_file_count": 1

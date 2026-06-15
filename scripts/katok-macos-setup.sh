@@ -23,7 +23,7 @@ echo "Enable your terminal app if you plan to use KakaoTalk UI automation, then 
 read -r _
 
 echo "Checking KakaoTalk readiness..."
-"$KATOK_BIN" doctor --json
+"$KATOK_BIN" doctor --macos-probe --json
 
 echo "Syncing live macOS KakaoTalk archive..."
 "$KATOK_BIN" sync --source macos --json

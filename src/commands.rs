@@ -24,7 +24,14 @@ pub(crate) fn run(
     semantic_dir: PathBuf,
 ) -> Result<()> {
     match command {
-        Commands::Doctor { json } => run_doctor(json, config, data_dir, archive_path, semantic_dir),
+        Commands::Doctor { macos_probe, json } => run_doctor(
+            macos_probe,
+            json,
+            config,
+            data_dir,
+            archive_path,
+            semantic_dir,
+        ),
         Commands::Sync { source, path, json } => {
             let source = source.unwrap_or_else(|| config.source_adapter.clone());
             run_sync(&source, path, json, &config, &archive_path, &data_dir)
@@ -51,24 +58,14 @@ pub(crate) fn run(
 }
 
 fn run_doctor(
+    macos_probe_enabled: bool,
     json: bool,
     config: KatokConfig,
     data_dir: PathBuf,
     archive_path: PathBuf,
     semantic_dir: PathBuf,
 ) -> Result<()> {
-    let macos_probe = match dirs::home_dir() {
-        Some(home) => {
-            let status = katok::kakao::probe_status(&home, &data_dir);
-            serde_json::json!({
-                "app_installed": status.app_installed,
-                "container_present": status.container_present,
-                "db_file_count": status.db_file_count,
-                "auth_cached": status.auth_cached
-            })
-        }
-        None => serde_json::json!({ "home_unavailable": true }),
-    };
+    let macos_probe = macos_probe_payload(macos_probe_enabled, &data_dir);
     let payload = serde_json::json!({
         "name": "katok",
         "command": "katok",
@@ -96,6 +93,28 @@ fn run_doctor(
         }
     });
     print_payload(json, &payload)
+}
+
+fn macos_probe_payload(enabled: bool, data_dir: &Path) -> serde_json::Value {
+    if !enabled {
+        return serde_json::json!({
+            "status": "not_checked",
+            "reason": "run katok doctor --macos-probe --json to check KakaoTalk app data access"
+        });
+    }
+    match dirs::home_dir() {
+        Some(home) => {
+            let status = katok::kakao::probe_status(&home, data_dir);
+            serde_json::json!({
+                "status": "checked",
+                "app_installed": status.app_installed,
+                "container_present": status.container_present,
+                "db_file_count": status.db_file_count,
+                "auth_cached": status.auth_cached
+            })
+        }
+        None => serde_json::json!({ "status": "home_unavailable" }),
+    }
 }
 
 fn run_sync(
