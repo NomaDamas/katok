@@ -1,33 +1,33 @@
-# macOS first-run setup
+# macOS 첫 설정
 
-`katok` can check KakaoTalk readiness automatically, but macOS does not allow a CLI to grant Full Disk Access or Accessibility by itself. The setup flow therefore does the next best thing:
+`katok`은 카카오톡 준비 상태를 자동으로 확인할 수 있지만, macOS는 CLI가 스스로 전체 디스크 접근 권한이나 손쉬운 사용 권한을 부여하는 것을 허용하지 않습니다. 설정 helper는 대신 아래 순서로 안내합니다.
 
-1. Open the exact System Settings panes.
-2. Ask the user to enable the current terminal app.
-3. Run `katok doctor --json` to confirm KakaoTalk app/container/DB visibility.
-4. Run `katok sync --source macos --json`.
-5. Run `katok index --json`.
-6. Run a semantic smoke search.
+1. 필요한 시스템 설정 화면을 엽니다.
+2. 현재 터미널 앱을 허용하도록 안내합니다.
+3. `katok doctor --json`으로 카카오톡 앱, 컨테이너, DB 접근 가능 여부를 확인합니다.
+4. `katok sync --source macos --json`으로 로컬 아카이브를 만듭니다.
+5. `katok index --json`으로 EmbeddingGemma 벡터 인덱스를 만듭니다.
+6. semantic smoke search를 실행합니다.
 
-Use the helper:
+helper 실행:
 
 ```bash
 scripts/katok-macos-setup.sh
 ```
 
-With a custom binary:
+직접 빌드한 binary를 사용할 때:
 
 ```bash
 KATOK_BIN=target/debug/katok scripts/katok-macos-setup.sh
 ```
 
-## Why this cannot be fully automatic
+## 완전 자동화가 안 되는 이유
 
-Apple's TCC permission system requires a user gesture in System Settings for Full Disk Access and Accessibility. A local app can open the pane and verify the result, but it cannot silently grant itself permission.
+Apple TCC 권한 시스템은 전체 디스크 접근 권한과 손쉬운 사용 권한에 대해 사용자의 시스템 설정 조작을 요구합니다. 로컬 앱은 설정 화면을 열고 결과를 확인할 수 있지만, 자기 자신에게 권한을 몰래 부여할 수는 없습니다.
 
-## Expected result
+## 기대 결과
 
-After the permission toggles are enabled, `katok doctor --json` should report:
+권한을 켠 뒤 `katok doctor --json`은 대략 아래 상태를 보여야 합니다.
 
 ```json
 {
@@ -41,4 +41,4 @@ After the permission toggles are enabled, `katok doctor --json` should report:
 }
 ```
 
-The exact `db_file_count` can vary by KakaoTalk account state.
+정확한 `db_file_count`는 카카오톡 계정 상태와 로컬 동기화 상태에 따라 달라질 수 있습니다.

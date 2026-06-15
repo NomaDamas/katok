@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "katok", about = "katok: local-first KakaoTalk memory CLI")]
+#[command(name = "katok", about = "katok: local KakaoTalk search CLI")]
 pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) data_dir: Option<PathBuf>,
