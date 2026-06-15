@@ -1,5 +1,5 @@
 class Katok < Formula
-  desc "Local-first KakaoTalk memory archive and search CLI for macOS"
+  desc "Local KakaoTalk keyword, BM25, and vector search CLI for Apple Silicon macOS"
   homepage "https://github.com/NomaDamas/katok"
   url "git@github.com:NomaDamas/katok.git",
     tag:      "v0.1.0",
