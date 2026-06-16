@@ -29,6 +29,9 @@ def main() -> int:
     cargo = read_text("Cargo.toml")
     release = read_text(".github/workflows/release.yml")
     ci = read_text(".github/workflows/ci.yml")
+    readme = read_text("README.md")
+    formula = read_text("Formula/katok.rb")
+    setup_script = read_text("scripts/katok-macos-setup.sh")
     has_dependency_path = re.search(r"\{[^}\n]*path\s*=", cargo) is not None
     commit_formula_match = re.search(
         r"- name: Commit formula(?P<body>.*?)(?:\n\s+- name:|\Z)",
@@ -86,6 +89,16 @@ def main() -> int:
             and 'system "cargo", "install", *std_cargo_args' in release
             and "katok doctor --json" in release,
             "Generated Homebrew formula installs via cargo and documents macOS permission check",
+        ),
+        check(
+            "homebrew-https-url",
+            "git@github.com:NomaDamas/katok.git" not in "\n".join(
+                [readme, formula, release, setup_script],
+            )
+            and "https://github.com/NomaDamas/katok.git" in readme
+            and 'url "https://github.com/NomaDamas/katok.git"' in formula
+            and 'url "https://github.com/NomaDamas/katok.git"' in release,
+            "Homebrew installation docs and formula URLs use HTTPS instead of SSH",
         ),
         check(
             "formula-commit-tag-env",
