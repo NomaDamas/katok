@@ -95,8 +95,17 @@ def main() -> int:
         ),
         check(
             "ci-preflight",
-            "cargo publish --dry-run" in ci and "python3 scripts/verify_release_config.py" in ci,
-            "CI runs package and release-config preflights",
+            "cargo publish --dry-run" in ci
+            and "python3 scripts/verify_release_config.py" in ci
+            and "cargo clippy --all-targets -- -D warnings" in ci,
+            "CI runs lint, package, and release-config preflights",
+        ),
+        check(
+            "release-preflight",
+            "cargo publish --dry-run" in release
+            and "python3 scripts/verify_release_config.py" in release
+            and "cargo clippy --all-targets -- -D warnings" in release,
+            "Release validation runs lint, package, and release-config preflights",
         ),
     ]
 
