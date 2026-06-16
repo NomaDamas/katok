@@ -21,13 +21,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.91.0
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Format
         run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
         env:
