@@ -25,7 +25,7 @@ Intel Mac은 지원하지 않습니다. 현재 로컬 임베딩 경로가 `faste
 Homebrew:
 
 ```bash
-brew tap NomaDamas/katok git@github.com:NomaDamas/katok.git
+brew tap NomaDamas/katok https://github.com/NomaDamas/katok.git
 brew install katok
 ```
 

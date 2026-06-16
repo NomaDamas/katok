@@ -147,7 +147,7 @@ jobs:
           gh release create "${{ needs.validate.outputs.tag }}" dist/* \
             --repo "${{ github.repository }}" \
             --title "katok ${{ needs.validate.outputs.version }}" \
-            --notes "Apple Silicon macOS KakaoTalk search CLI. Install with cargo install katok or brew tap NomaDamas/katok git@github.com:NomaDamas/katok.git && brew install katok."
+            --notes "Apple Silicon macOS KakaoTalk search CLI. Install with cargo install katok or brew tap NomaDamas/katok https://github.com/NomaDamas/katok.git && brew install katok."
 
   update-homebrew:
     name: Update Homebrew tap
@@ -175,7 +175,7 @@ jobs:
           class Katok < Formula
             desc "Local KakaoTalk keyword, BM25, and vector search CLI for Apple Silicon macOS"
             homepage "https://github.com/NomaDamas/katok"
-            url "git@github.com:NomaDamas/katok.git",
+            url "https://github.com/NomaDamas/katok.git",
               tag:      "${TAG}",
               revision: "${revision}"
             license "MIT"
