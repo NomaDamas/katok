@@ -326,3 +326,60 @@ fn cli_search_limit_flag_caps_result_count() {
         "--limit 2 should cap results to two"
     );
 }
+
+#[test]
+fn cli_resync_refreshes_existing_message_chat_name() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let data_dir = dir.path();
+    let fixture = dir.path().join("resync.jsonl");
+
+    let write_fixture = |chat_name: &str| {
+        std::fs::write(
+            &fixture,
+            format!(
+                "{{\"account_hash\":\"acct-x\",\"chat_id\":\"100\",\"chat_name\":\"{chat_name}\",\
+                 \"chat_type\":\"group\",\"message_id\":\"m100\",\"sender_id\":\"u1\",\
+                 \"sender_nickname\":\"nick1\",\"timestamp\":\"2026-01-01T09:00:00Z\",\
+                 \"text\":\"재동기화 검색어\",\"message_type\":\"text\",\
+                 \"reply_to_message_id\":null}}\n"
+            ),
+        )
+        .expect("write fixture");
+    };
+
+    let sync_fixture = || {
+        Command::cargo_bin("katok")
+            .expect("katok binary")
+            .args([
+                "--data-dir",
+                data_dir.to_str().expect("utf8 path"),
+                "sync",
+                "--source",
+                "fixture",
+                fixture.to_str().expect("utf8 path"),
+                "--json",
+            ])
+            .assert()
+            .success();
+    };
+
+    write_fixture("chat-100");
+    sync_fixture();
+    write_fixture("Alice, Bob");
+    sync_fixture();
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "search",
+            "keyword",
+            "재동기화",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"chat_name\": \"Alice, Bob\""))
+        .stdout(predicate::str::contains("\"chat_name\": \"chat-100\"").not());
+}
