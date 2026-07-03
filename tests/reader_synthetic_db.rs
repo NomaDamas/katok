@@ -419,3 +419,88 @@ fn reconstructs_names_for_unnamed_rooms() {
         .expect("group message");
     assert_eq!(group_msg.chat_name, "Alice, BobNick");
 }
+
+/// An older KakaoTalk schema without an `NTChatMeta` table and without the
+/// `NTChatRoom.displayMemberIds` column must still read: the best-effort title
+/// and member enrichment skip cleanly, and an unnamed room keeps `chat-<id>`.
+#[test]
+fn reads_older_schema_without_title_or_member_columns() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let home = temp.path().join("home");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+
+    let container = auth::container_dir(&home);
+    std::fs::create_dir_all(&container).expect("container dir");
+    let db_name = derive::database_name(TEST_USER_ID, TEST_UUID);
+    let db_path = container.join(&db_name);
+    let key = derive::secure_key(TEST_USER_ID, TEST_UUID);
+
+    let conn = Connection::open(&db_path).expect("open db");
+    conn.execute_batch(&format!(
+        "PRAGMA key = '{key}'; PRAGMA cipher_compatibility = 3;"
+    ))
+    .expect("cipher key");
+    // No displayMemberIds column, and no NTChatMeta table at all.
+    conn.execute_batch(
+        "CREATE TABLE NTChatRoom (
+            chatId INTEGER NOT NULL DEFAULT 0,
+            linkId INTEGER NOT NULL DEFAULT 0,
+            type INTEGER NOT NULL DEFAULT 0,
+            chatName TEXT,
+            activeMembersCount INTEGER NOT NULL DEFAULT 0,
+            directChatMemberUserId INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (chatId, linkId)
+        );
+        CREATE TABLE NTUser (
+            userId INTEGER NOT NULL DEFAULT 0,
+            linkId INTEGER NOT NULL DEFAULT 0,
+            friendNickName TEXT,
+            nickName TEXT,
+            displayName TEXT,
+            PRIMARY KEY (userId, linkId)
+        );
+        CREATE TABLE NTChatMessage (
+            chatId INTEGER NOT NULL DEFAULT 0,
+            logId INTEGER NOT NULL DEFAULT 0,
+            msgId INTEGER NOT NULL DEFAULT 0,
+            authorId INTEGER NOT NULL DEFAULT 0,
+            type INTEGER NOT NULL DEFAULT -1,
+            supplement TEXT,
+            message TEXT,
+            sentAt INTEGER DEFAULT 0,
+            PRIMARY KEY (chatId, logId, msgId)
+        );",
+    )
+    .expect("create old schema");
+    conn.execute(
+        "INSERT INTO NTChatRoom(chatId, linkId, type, chatName, activeMembersCount, directChatMemberUserId)
+         VALUES (700, 0, 1, '', 3, 0)",
+        [],
+    )
+    .expect("room");
+    conn.execute(
+        "INSERT INTO NTChatMessage(chatId, logId, msgId, authorId, type, supplement, message, sentAt)
+         VALUES (700, 70, 1, 800, 1, NULL, 'old schema hi', 1700000000)",
+        [],
+    )
+    .expect("message");
+    drop(conn);
+
+    let options = AuthOptions {
+        home,
+        data_dir,
+        user_id_override: Some(TEST_USER_ID),
+        uuid_override: Some(TEST_UUID.to_string()),
+        max_user_id: 0,
+    };
+    let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
+
+    assert_eq!(output.messages.len(), 1);
+    let chat = output
+        .chats
+        .iter()
+        .find(|chat| chat.chat_id == "700")
+        .expect("chat 700");
+    assert_eq!(chat.chat_name, "chat-700");
+}

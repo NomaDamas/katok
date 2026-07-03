@@ -88,7 +88,10 @@ katok index --json
 katok search keyword "계약서" --json
 katok search bm25 "지난주 미팅 자료" --json
 katok search semantic "최근에 논의한 세금 신고 일정" --json
+katok search bm25 "지난주 미팅 자료" --limit 30 --json
 ```
+
+각 `search` 명령은 `--limit <N>`(기본 10)으로 반환할 결과 개수를 조절할 수 있습니다.
 
 검색 최신성이 중요하면 검색 전에 항상 `katok doctor --json`의 `freshness`를 확인하세요. 이 기본 doctor는 macOS app data probe를 실행하지 않으므로 권한 prompt 없이 사용할 수 있습니다. `sync_before_search`가 `true`이면 `katok sync --source macos --json`을 먼저 실행하고, `index_before_semantic_search`가 `true`이면 `katok index --json`을 실행한 뒤 semantic search를 사용합니다.
 
