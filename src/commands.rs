@@ -161,23 +161,23 @@ fn run_search(
 ) -> Result<()> {
     let archive = Archive::open(archive_path).context("open archive")?;
     match command {
-        SearchCommand::Keyword { query, json } => {
-            let hits = keyword_search_with_snippet(&archive, &query, 10, config.snippet_length)
+        SearchCommand::Keyword { query, limit, json } => {
+            let hits = keyword_search_with_snippet(&archive, &query, limit, config.snippet_length)
                 .context("keyword search")?;
             print_payload(json, &hits)
         }
-        SearchCommand::Bm25 { query, json } => {
-            let hits = bm25_search_with_snippet(&archive, &query, 10, config.snippet_length)
+        SearchCommand::Bm25 { query, limit, json } => {
+            let hits = bm25_search_with_snippet(&archive, &query, limit, config.snippet_length)
                 .context("bm25 search")?;
             print_payload(json, &hits)
         }
-        SearchCommand::Semantic { query, json } => {
+        SearchCommand::Semantic { query, limit, json } => {
             let hits = if std::env::var("KATOK_EMBEDDER").unwrap_or_default() == "mock" {
                 semantic_search_with_snippet(
                     &archive,
                     semantic_dir,
                     &query,
-                    10,
+                    limit,
                     config.snippet_length,
                 )
                 .context("semantic search")?
@@ -191,7 +191,7 @@ fn run_search(
                         &archive,
                         semantic_dir,
                         &query,
-                        10,
+                        limit,
                         config,
                     ))
                     .context("semantic search")?

@@ -69,16 +69,25 @@ pub(crate) enum Commands {
 pub(crate) enum SearchCommand {
     Keyword {
         query: String,
+        /// Maximum number of results to return.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
         #[arg(long)]
         json: bool,
     },
     Bm25 {
         query: String,
+        /// Maximum number of results to return.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
         #[arg(long)]
         json: bool,
     },
     Semantic {
         query: String,
+        /// Maximum number of results to return.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
         #[arg(long)]
         json: bool,
     },
