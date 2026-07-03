@@ -9,6 +9,7 @@ use chrono::{TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
+use super::bplist;
 use crate::types::RawMessage;
 use crate::{Error, Result};
 
@@ -31,6 +32,15 @@ pub struct ChatRecord {
 struct RoomMeta {
     name: Option<String>,
     chat_type: String,
+    /// User-set custom room title (KakaoTalk "rename chat"), stored in
+    /// `NTChatMeta` rather than `NTChatRoom.chatName`. `None` when never renamed.
+    title: Option<String>,
+    /// The peer's userId for a 1:1 direct chat (0 when not a direct chat).
+    direct_member_id: i64,
+    /// Display-member userIds for a group room (self excluded), used to
+    /// reconstruct a name when neither `chatName` nor a title exists. Empty when
+    /// unavailable.
+    display_member_ids: Vec<i64>,
 }
 
 /// Open `path` with `key` as a passphrase in cipher-compatibility mode 3,
@@ -113,6 +123,9 @@ fn load_rooms(conn: &Connection) -> Result<HashMap<i64, RoomMeta>> {
                 RoomMeta {
                     name: name.filter(|value| !value.is_empty()),
                     chat_type: classify_room(room_type, direct_member, active_members),
+                    title: None,
+                    direct_member_id: direct_member,
+                    display_member_ids: Vec::new(),
                 },
             ))
         })
@@ -123,7 +136,104 @@ fn load_rooms(conn: &Connection) -> Result<HashMap<i64, RoomMeta>> {
         let (chat_id, meta) = row;
         rooms.entry(chat_id).or_insert(meta);
     }
+    enrich_titles(conn, &mut rooms);
+    enrich_display_members(conn, &mut rooms);
     Ok(rooms)
+}
+
+/// Best-effort: fill `title` from the user-set room title KakaoTalk stores in
+/// `NTChatMeta` (a `type = 3` row whose `content` is the current name), keeping
+/// the highest `revision` when a room was renamed more than once. An older
+/// schema without the table — or any read error — simply leaves titles unset.
+fn enrich_titles(conn: &Connection, rooms: &mut HashMap<i64, RoomMeta>) {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT chatId, content, revision FROM NTChatMeta
+         WHERE type = 3 AND content IS NOT NULL AND content <> ''",
+    ) else {
+        return;
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        let chat_id: i64 = row.get(0)?;
+        let content: String = row.get(1)?;
+        let revision: i64 = row.get(2).unwrap_or(0);
+        Ok((chat_id, content, revision))
+    }) else {
+        return;
+    };
+    // Keep the latest title (highest revision) per room.
+    let mut best: HashMap<i64, (i64, String)> = HashMap::new();
+    for (chat_id, content, revision) in rows.flatten() {
+        match best.get(&chat_id) {
+            Some((seen, _)) if *seen >= revision => {}
+            _ => {
+                best.insert(chat_id, (revision, content));
+            }
+        }
+    }
+    for (chat_id, (_, title)) in best {
+        if let Some(meta) = rooms.get_mut(&chat_id) {
+            meta.title = Some(title);
+        }
+    }
+}
+
+/// Best-effort: fill `display_member_ids` from `NTChatRoom.displayMemberIds`, a
+/// binary-plist array of the room's display-member userIds. An older schema that
+/// lacks the column — or any read/parse error — simply leaves group rooms
+/// without a reconstructed name; it never aborts the room load.
+fn enrich_display_members(conn: &Connection, rooms: &mut HashMap<i64, RoomMeta>) {
+    let Ok(mut stmt) = conn.prepare("SELECT chatId, displayMemberIds FROM NTChatRoom") else {
+        return;
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        let chat_id: i64 = row.get(0)?;
+        let blob: Option<Vec<u8>> = row.get(1)?;
+        Ok((chat_id, blob))
+    }) else {
+        return;
+    };
+    for (chat_id, blob) in rows.flatten() {
+        if let Some(members) = blob.as_deref().and_then(bplist::int_array) {
+            if let Some(meta) = rooms.get_mut(&chat_id) {
+                meta.display_member_ids = members;
+            }
+        }
+    }
+}
+
+/// Resolve a human-readable chat name, falling back in order: an explicit
+/// `chatName` → the user-set custom title → the direct peer's nickname (1:1
+/// chats) → joined display-member nicknames (group chats) → the `chat-<id>`
+/// placeholder. KakaoTalk leaves `chatName` empty for auto-titled rooms and
+/// composes the shown name from a title meta or from members at render time;
+/// this mirrors that from the same DB, adding no logs.
+fn resolve_chat_name(
+    meta: Option<&RoomMeta>,
+    chat_id: i64,
+    users: &HashMap<i64, String>,
+) -> String {
+    if let Some(meta) = meta {
+        if let Some(name) = &meta.name {
+            return name.clone();
+        }
+        if let Some(title) = &meta.title {
+            return title.clone();
+        }
+        if meta.direct_member_id != 0 {
+            if let Some(name) = users.get(&meta.direct_member_id) {
+                return name.clone();
+            }
+        }
+        let joined: Vec<&str> = meta
+            .display_member_ids
+            .iter()
+            .filter_map(|id| users.get(id).map(String::as_str))
+            .collect();
+        if !joined.is_empty() {
+            return joined.join(", ");
+        }
+    }
+    format!("chat-{chat_id}")
 }
 
 fn load_users(conn: &Connection) -> Result<HashMap<i64, String>> {
@@ -228,6 +338,12 @@ fn read_one(
     users: &HashMap<i64, String>,
 ) -> Result<(HashMap<String, ChatRecord>, Vec<RawMessage>)> {
     let rooms = load_rooms(conn)?;
+    // Resolve each room's display name once (peer/member joins need `users`),
+    // then reuse per message rather than recomputing a join per row.
+    let chat_names: HashMap<i64, String> = rooms
+        .iter()
+        .map(|(chat_id, meta)| (*chat_id, resolve_chat_name(Some(meta), *chat_id, users)))
+        .collect();
 
     let mut stmt = conn
         .prepare(
@@ -273,8 +389,9 @@ fn read_one(
         let chat_type = room
             .map(|meta| meta.chat_type.clone())
             .unwrap_or_else(|| "direct".to_string());
-        let chat_name = room
-            .and_then(|meta| meta.name.clone())
+        let chat_name = chat_names
+            .get(&chat_id)
+            .cloned()
             .unwrap_or_else(|| format!("chat-{chat_id}"));
 
         let sender_nickname = if author_id == user_id {
