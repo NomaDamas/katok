@@ -248,3 +248,81 @@ fn cli_rejects_malformed_config_and_missing_kakaocli_without_private_dump() {
         .failure()
         .stderr(predicate::str::contains("kakaocli not found on PATH"));
 }
+
+#[test]
+fn cli_search_limit_flag_caps_result_count() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let data_dir = dir.path();
+
+    // Four messages, each in its OWN chat so they chunk (and rank) as four
+    // separate hits, all sharing the query term.
+    let fixture = dir.path().join("limit.jsonl");
+    let mut lines = String::new();
+    for i in 1..=4 {
+        lines.push_str(&format!(
+            "{{\"account_hash\":\"acct-x\",\"chat_id\":\"chat-{i}\",\"chat_name\":\"Room {i}\",\
+             \"chat_type\":\"group\",\"message_id\":\"m{i}\",\"sender_id\":\"u{i}\",\
+             \"sender_nickname\":\"nick{i}\",\"timestamp\":\"2026-01-01T09:0{i}:00Z\",\
+             \"text\":\"공통키워드 점검보고\",\"message_type\":\"text\",\
+             \"reply_to_message_id\":null}}\n"
+        ));
+    }
+    std::fs::write(&fixture, lines).expect("write fixture");
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "sync",
+            "--source",
+            "fixture",
+            fixture.to_str().expect("utf8 path"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let count_hits = |args: &[&str]| -> usize {
+        let output = Command::cargo_bin("katok")
+            .expect("katok binary")
+            .args(args)
+            .output()
+            .expect("run search");
+        assert!(output.status.success(), "search should succeed");
+        String::from_utf8(output.stdout)
+            .expect("utf8 stdout")
+            .matches("\"chunk_id\"")
+            .count()
+    };
+
+    // Default limit surfaces all four independent hits.
+    assert_eq!(
+        count_hits(&[
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "search",
+            "keyword",
+            "점검보고",
+            "--json",
+        ]),
+        4,
+        "default limit should return every hit"
+    );
+
+    // --limit 2 caps the same query to two hits.
+    assert_eq!(
+        count_hits(&[
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "search",
+            "keyword",
+            "점검보고",
+            "--limit",
+            "2",
+            "--json",
+        ]),
+        2,
+        "--limit 2 should cap results to two"
+    );
+}
