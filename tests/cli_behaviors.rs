@@ -248,3 +248,138 @@ fn cli_rejects_malformed_config_and_missing_kakaocli_without_private_dump() {
         .failure()
         .stderr(predicate::str::contains("kakaocli not found on PATH"));
 }
+
+#[test]
+fn cli_search_limit_flag_caps_result_count() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let data_dir = dir.path();
+
+    // Four messages, each in its OWN chat so they chunk (and rank) as four
+    // separate hits, all sharing the query term.
+    let fixture = dir.path().join("limit.jsonl");
+    let mut lines = String::new();
+    for i in 1..=4 {
+        lines.push_str(&format!(
+            "{{\"account_hash\":\"acct-x\",\"chat_id\":\"chat-{i}\",\"chat_name\":\"Room {i}\",\
+             \"chat_type\":\"group\",\"message_id\":\"m{i}\",\"sender_id\":\"u{i}\",\
+             \"sender_nickname\":\"nick{i}\",\"timestamp\":\"2026-01-01T09:0{i}:00Z\",\
+             \"text\":\"공통키워드 점검보고\",\"message_type\":\"text\",\
+             \"reply_to_message_id\":null}}\n"
+        ));
+    }
+    std::fs::write(&fixture, lines).expect("write fixture");
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "sync",
+            "--source",
+            "fixture",
+            fixture.to_str().expect("utf8 path"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let count_hits = |args: &[&str]| -> usize {
+        let output = Command::cargo_bin("katok")
+            .expect("katok binary")
+            .args(args)
+            .output()
+            .expect("run search");
+        assert!(output.status.success(), "search should succeed");
+        String::from_utf8(output.stdout)
+            .expect("utf8 stdout")
+            .matches("\"chunk_id\"")
+            .count()
+    };
+
+    // Default limit surfaces all four independent hits.
+    assert_eq!(
+        count_hits(&[
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "search",
+            "keyword",
+            "점검보고",
+            "--json",
+        ]),
+        4,
+        "default limit should return every hit"
+    );
+
+    // --limit 2 caps the same query to two hits.
+    assert_eq!(
+        count_hits(&[
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "search",
+            "keyword",
+            "점검보고",
+            "--limit",
+            "2",
+            "--json",
+        ]),
+        2,
+        "--limit 2 should cap results to two"
+    );
+}
+
+#[test]
+fn cli_resync_refreshes_existing_message_chat_name() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let data_dir = dir.path();
+    let fixture = dir.path().join("resync.jsonl");
+
+    let write_fixture = |chat_name: &str| {
+        std::fs::write(
+            &fixture,
+            format!(
+                "{{\"account_hash\":\"acct-x\",\"chat_id\":\"100\",\"chat_name\":\"{chat_name}\",\
+                 \"chat_type\":\"group\",\"message_id\":\"m100\",\"sender_id\":\"u1\",\
+                 \"sender_nickname\":\"nick1\",\"timestamp\":\"2026-01-01T09:00:00Z\",\
+                 \"text\":\"재동기화 검색어\",\"message_type\":\"text\",\
+                 \"reply_to_message_id\":null}}\n"
+            ),
+        )
+        .expect("write fixture");
+    };
+
+    let sync_fixture = || {
+        Command::cargo_bin("katok")
+            .expect("katok binary")
+            .args([
+                "--data-dir",
+                data_dir.to_str().expect("utf8 path"),
+                "sync",
+                "--source",
+                "fixture",
+                fixture.to_str().expect("utf8 path"),
+                "--json",
+            ])
+            .assert()
+            .success();
+    };
+
+    write_fixture("chat-100");
+    sync_fixture();
+    write_fixture("Alice, Bob");
+    sync_fixture();
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "search",
+            "keyword",
+            "재동기화",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"chat_name\": \"Alice, Bob\""))
+        .stdout(predicate::str::contains("\"chat_name\": \"chat-100\"").not());
+}

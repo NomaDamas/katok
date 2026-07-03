@@ -5,17 +5,27 @@ use crate::{
 };
 use rusqlite::params;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageChange {
+    Inserted,
+    Updated,
+    Unchanged,
+}
+
 impl Archive {
     pub fn sync_messages(&self, messages: &[RawMessage]) -> Result<SyncReport> {
         let mut inserted = 0usize;
+        let mut updated = 0usize;
         for message in messages {
             self.upsert_chat(message)?;
-            inserted += self.insert_message(message)?;
+            let change = self.upsert_message(message)?;
+            inserted += usize::from(change == MessageChange::Inserted);
+            updated += usize::from(change == MessageChange::Updated);
             self.update_cursor(message)?;
         }
         Ok(SyncReport {
             inserted_messages: inserted,
-            updated_messages: 0,
+            updated_messages: updated,
             total_messages: self.count_rows("messages")?,
             chunks: self.count_rows("chunks")?,
         })
@@ -48,21 +58,37 @@ impl Archive {
     fn upsert_chat(&self, message: &RawMessage) -> Result<()> {
         self.conn
             .execute(
-                "INSERT OR IGNORE INTO chats(chat_id, chat_name, chat_type)
-             VALUES (?1, ?2, ?3)",
+                "INSERT INTO chats(chat_id, chat_name, chat_type)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(chat_id) DO UPDATE SET
+                 chat_name = excluded.chat_name,
+                 chat_type = excluded.chat_type
+             WHERE chats.chat_name <> excluded.chat_name
+                OR chats.chat_type <> excluded.chat_type",
                 params![message.chat_id, message.chat_name, message.chat_type],
             )
             .map_err(Error::Sql)?;
         Ok(())
     }
 
-    fn insert_message(&self, message: &RawMessage) -> Result<usize> {
-        self.conn
+    fn upsert_message(&self, message: &RawMessage) -> Result<MessageChange> {
+        let exists = self.message_exists(message)?;
+        let changed = self
+            .conn
             .execute(
-                "INSERT OR IGNORE INTO messages
+                "INSERT INTO messages
              (account_hash, chat_id, chat_name, chat_type, message_id, sender_id,
               sender_nickname, timestamp, text, message_type, reply_to_message_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(account_hash, chat_id, message_id) DO UPDATE SET
+                 chat_name = excluded.chat_name,
+                 chat_type = excluded.chat_type,
+                 sender_nickname = excluded.sender_nickname,
+                 reply_to_message_id = excluded.reply_to_message_id
+             WHERE messages.chat_name <> excluded.chat_name
+                OR messages.chat_type <> excluded.chat_type
+                OR messages.sender_nickname <> excluded.sender_nickname
+                OR messages.reply_to_message_id IS NOT excluded.reply_to_message_id",
                 params![
                     message.account_hash,
                     message.chat_id,
@@ -76,6 +102,24 @@ impl Archive {
                     message.message_type,
                     message.reply_to_message_id
                 ],
+            )
+            .map_err(Error::Sql)?;
+        Ok(match (exists, changed) {
+            (false, 1) => MessageChange::Inserted,
+            (true, 1) => MessageChange::Updated,
+            _ => MessageChange::Unchanged,
+        })
+    }
+
+    fn message_exists(&self, message: &RawMessage) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM messages
+                    WHERE account_hash = ?1 AND chat_id = ?2 AND message_id = ?3
+                 )",
+                params![message.account_hash, message.chat_id, message.message_id],
+                |row| row.get(0),
             )
             .map_err(Error::Sql)
     }

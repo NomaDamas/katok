@@ -7,6 +7,7 @@
 //! ids, timestamps, and status are ever emitted.
 
 pub mod auth;
+mod bplist;
 pub mod derive;
 pub mod reader;
 

@@ -32,6 +32,7 @@ fn open_with_schema(path: &Path, key: &str) -> Connection {
             chatName TEXT,
             activeMembersCount INTEGER NOT NULL DEFAULT 0,
             directChatMemberUserId INTEGER NOT NULL DEFAULT 0,
+            displayMemberIds BLOB,
             PRIMARY KEY (chatId, linkId)
         );
         CREATE TABLE NTUser (
@@ -52,6 +53,13 @@ fn open_with_schema(path: &Path, key: &str) -> Connection {
             message TEXT,
             sentAt INTEGER DEFAULT 0,
             PRIMARY KEY (chatId, logId, msgId)
+        );
+        CREATE TABLE NTChatMeta (
+            chatId INTEGER NOT NULL DEFAULT 0,
+            type INTEGER NOT NULL DEFAULT 0,
+            revision INTEGER NOT NULL DEFAULT 0,
+            content TEXT,
+            PRIMARY KEY (chatId, type, revision)
         );",
     )
     .expect("create schema");
@@ -283,4 +291,131 @@ fn discovers_and_reads_db_suffixed_file() {
     // Same content as the bare-named DB: 5 mapped messages, 2 chats.
     assert_eq!(output.messages.len(), 5);
     assert_eq!(output.chats.len(), 2);
+}
+
+/// When `chatName` is empty (the common case for auto-titled rooms), the reader
+/// reconstructs a human name from the same DB the way the KakaoTalk UI does: a
+/// direct chat takes its peer's nickname, a group chat joins its display-member
+/// nicknames, and a room whose members resolve to nothing keeps `chat-<id>`.
+#[test]
+fn reconstructs_names_for_unnamed_rooms() {
+    // `displayMemberIds` binary plists from CPython `plistlib.dumps(_, FMT_BINARY)`.
+    // [500, 600]
+    const DISPLAY_MEMBERS_500_600: &[u8] = &[
+        0x62, 0x70, 0x6c, 0x69, 0x73, 0x74, 0x30, 0x30, 0xa2, 0x01, 0x02, 0x11, 0x01, 0xf4, 0x11,
+        0x02, 0x58, 0x08, 0x0b, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11,
+    ];
+    // [999] (no matching NTUser row)
+    const DISPLAY_MEMBERS_999: &[u8] = &[
+        0x62, 0x70, 0x6c, 0x69, 0x73, 0x74, 0x30, 0x30, 0xa1, 0x01, 0x11, 0x03, 0xe7, 0x08, 0x0a,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x0d,
+    ];
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let home = temp.path().join("home");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+
+    let container = auth::container_dir(&home);
+    std::fs::create_dir_all(&container).expect("container dir");
+    let db_name = derive::database_name(TEST_USER_ID, TEST_UUID);
+    let db_path = container.join(&db_name);
+    let key = derive::secure_key(TEST_USER_ID, TEST_UUID);
+
+    let conn = open_with_schema(&db_path, &key);
+    conn.execute(
+        "INSERT INTO NTUser(userId, linkId, friendNickName, nickName, displayName)
+         VALUES (500, 0, 'Alice', NULL, 'Alice Display'),
+                (600, 0, NULL, 'BobNick', NULL),
+                (240061982, 0, NULL, NULL, 'Me Display')",
+        [],
+    )
+    .expect("insert users");
+
+    // Room 100: direct, empty name, peer 500  → "Alice".
+    conn.execute(
+        "INSERT INTO NTChatRoom(chatId, linkId, type, chatName, activeMembersCount, directChatMemberUserId, displayMemberIds)
+         VALUES (100, 0, 0, '', 2, 500, NULL)",
+        [],
+    )
+    .expect("room 100");
+    // Room 200: group, empty name, displayMembers [500, 600] → "Alice, BobNick".
+    conn.execute(
+        "INSERT INTO NTChatRoom(chatId, linkId, type, chatName, activeMembersCount, directChatMemberUserId, displayMemberIds)
+         VALUES (200, 0, 1, '', 3, 0, ?1)",
+        rusqlite::params![DISPLAY_MEMBERS_500_600],
+    )
+    .expect("room 200");
+    // Room 300: group, empty name, displayMembers [999] (unresolvable) → "chat-300".
+    conn.execute(
+        "INSERT INTO NTChatRoom(chatId, linkId, type, chatName, activeMembersCount, directChatMemberUserId, displayMemberIds)
+         VALUES (300, 0, 1, '', 5, 0, ?1)",
+        rusqlite::params![DISPLAY_MEMBERS_999],
+    )
+    .expect("room 300");
+    // Room 400: group, empty name, has a user-set title AND resolvable members;
+    // the title must win over the member join.
+    conn.execute(
+        "INSERT INTO NTChatRoom(chatId, linkId, type, chatName, activeMembersCount, directChatMemberUserId, displayMemberIds)
+         VALUES (400, 0, 1, '', 3, 0, ?1)",
+        rusqlite::params![DISPLAY_MEMBERS_500_600],
+    )
+    .expect("room 400");
+    // Two title revisions for room 400: the highest revision (the rename) wins.
+    conn.execute(
+        "INSERT INTO NTChatMeta(chatId, type, revision, content)
+         VALUES (400, 3, 1, 'Old Title'),
+                (400, 3, 5, 'Renamed Room'),
+                (200, 1, 9, 'a notice, not a title')",
+        [],
+    )
+    .expect("insert meta");
+
+    // One message per room so each chat surfaces in the reader output.
+    conn.execute(
+        "INSERT INTO NTChatMessage(chatId, logId, msgId, authorId, type, supplement, message, sentAt)
+         VALUES (100, 10, 1, 500, 1, NULL, 'hi direct', 1700000000),
+                (200, 20, 2, 600, 1, NULL, 'hi group', 1700000100),
+                (300, 30, 3, 500, 1, NULL, 'hi other', 1700000200),
+                (400, 40, 4, 500, 1, NULL, 'hi titled', 1700000300)",
+        [],
+    )
+    .expect("insert messages");
+    drop(conn);
+
+    let options = AuthOptions {
+        home,
+        data_dir,
+        user_id_override: Some(TEST_USER_ID),
+        uuid_override: Some(TEST_UUID.to_string()),
+        max_user_id: 0,
+    };
+    let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
+
+    let name_of = |id: &str| {
+        output
+            .chats
+            .iter()
+            .find(|chat| chat.chat_id == id)
+            .unwrap_or_else(|| panic!("missing chat {id}"))
+            .chat_name
+            .clone()
+    };
+    assert_eq!(name_of("100"), "Alice"); // direct peer's nickname
+    assert_eq!(name_of("200"), "Alice, BobNick"); // joined display members
+    assert_eq!(name_of("300"), "chat-300"); // members resolve to nothing
+    assert_eq!(name_of("400"), "Renamed Room"); // latest title beats member join
+
+    // The reconstructed name also rides on each mapped message, not just the
+    // chat summary.
+    let group_msg = output
+        .messages
+        .iter()
+        .find(|message| message.chat_id == "200")
+        .expect("group message");
+    assert_eq!(group_msg.chat_name, "Alice, BobNick");
 }
