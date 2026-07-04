@@ -107,6 +107,12 @@ def main() -> int:
             "Homebrew formula commit step has TAG in its own environment",
         ),
         check(
+            "formula-revision-from-trigger-sha",
+            'revision="${GITHUB_SHA}"' in release
+            and 'git rev-list -n 1 "${TAG}"' not in release,
+            "Homebrew formula revision uses the tag-triggering commit without requiring fetched tags",
+        ),
+        check(
             "ci-preflight",
             "cargo publish --dry-run" in ci
             and "python3 scripts/verify_release_config.py" in ci
