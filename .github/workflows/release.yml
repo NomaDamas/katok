@@ -170,7 +170,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p Formula
-          revision="$(git rev-list -n 1 "${TAG}")"
+          revision="${GITHUB_SHA}"
           cat > Formula/katok.rb <<RUBY
           class Katok < Formula
             desc "Local KakaoTalk keyword, BM25, and vector search CLI for Apple Silicon macOS"
