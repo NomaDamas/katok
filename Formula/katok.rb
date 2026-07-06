@@ -2,8 +2,8 @@ class Katok < Formula
   desc "Local KakaoTalk keyword, BM25, and vector search CLI for Apple Silicon macOS"
   homepage "https://github.com/NomaDamas/katok"
   url "https://github.com/NomaDamas/katok.git",
-    tag:      "v0.1.1",
-    revision: "ed494b1e2d748077bb11d7b028e6ecbc0ec5e67e"
+    tag:      "v0.1.2",
+    revision: "52f1e3511e3c4708a676f472b9c4fa65d68b35f6"
   license "MIT"
 
   depends_on "rust" => :build
