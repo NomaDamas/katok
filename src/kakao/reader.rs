@@ -146,33 +146,24 @@ fn load_rooms(conn: &Connection) -> Result<HashMap<i64, RoomMeta>> {
 /// the highest `revision` when a room was renamed more than once. An older
 /// schema without the table — or any read error — simply leaves titles unset.
 fn enrich_titles(conn: &Connection, rooms: &mut HashMap<i64, RoomMeta>) {
+    // Order ascending and overwrite as we go, so the last row seen per room is the
+    // highest revision — with `content` breaking exact-revision ties — making the
+    // chosen title deterministic regardless of SQLite's row order.
     let Ok(mut stmt) = conn.prepare(
-        "SELECT chatId, content, revision FROM NTChatMeta
-         WHERE type = 3 AND content IS NOT NULL AND content <> ''",
+        "SELECT chatId, content FROM NTChatMeta
+         WHERE type = 3 AND content IS NOT NULL AND content <> ''
+         ORDER BY revision ASC, content ASC",
     ) else {
         return;
     };
     let Ok(rows) = stmt.query_map([], |row| {
-        let chat_id: i64 = row.get(0)?;
-        let content: String = row.get(1)?;
-        let revision: i64 = row.get(2).unwrap_or(0);
-        Ok((chat_id, content, revision))
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
     }) else {
         return;
     };
-    // Keep the latest title (highest revision) per room.
-    let mut best: HashMap<i64, (i64, String)> = HashMap::new();
-    for (chat_id, content, revision) in rows.flatten() {
-        match best.get(&chat_id) {
-            Some((seen, _)) if *seen >= revision => {}
-            _ => {
-                best.insert(chat_id, (revision, content));
-            }
-        }
-    }
-    for (chat_id, (_, title)) in best {
+    for (chat_id, content) in rows.flatten() {
         if let Some(meta) = rooms.get_mut(&chat_id) {
-            meta.title = Some(title);
+            meta.title = Some(content);
         }
     }
 }
@@ -210,8 +201,12 @@ fn enrich_display_members(conn: &Connection, rooms: &mut HashMap<i64, RoomMeta>)
 fn resolve_chat_name(
     meta: Option<&RoomMeta>,
     chat_id: i64,
+    self_user_id: i64,
     users: &HashMap<i64, String>,
 ) -> String {
+    // Cap the reconstructed group name so a long member list stays readable and
+    // a corrupt one cannot bloat the name cloned onto every message.
+    const MAX_DISPLAY_MEMBERS: usize = 8;
     if let Some(meta) = meta {
         if let Some(name) = &meta.name {
             return name.clone();
@@ -219,7 +214,9 @@ fn resolve_chat_name(
         if let Some(title) = &meta.title {
             return title.clone();
         }
-        if meta.direct_member_id != 0 {
+        // Direct chat: the peer's nickname. Never the account owner itself
+        // (a self-chat / anomalous room must fall through, not take our name).
+        if meta.direct_member_id != 0 && meta.direct_member_id != self_user_id {
             if let Some(name) = users.get(&meta.direct_member_id) {
                 return name.clone();
             }
@@ -227,7 +224,9 @@ fn resolve_chat_name(
         let joined: Vec<&str> = meta
             .display_member_ids
             .iter()
+            .filter(|id| **id != self_user_id)
             .filter_map(|id| users.get(id).map(String::as_str))
+            .take(MAX_DISPLAY_MEMBERS)
             .collect();
         if !joined.is_empty() {
             return joined.join(", ");
@@ -342,7 +341,12 @@ fn read_one(
     // then reuse per message rather than recomputing a join per row.
     let chat_names: HashMap<i64, String> = rooms
         .iter()
-        .map(|(chat_id, meta)| (*chat_id, resolve_chat_name(Some(meta), *chat_id, users)))
+        .map(|(chat_id, meta)| {
+            (
+                *chat_id,
+                resolve_chat_name(Some(meta), *chat_id, user_id, users),
+            )
+        })
         .collect();
 
     let mut stmt = conn
