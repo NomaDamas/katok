@@ -16,6 +16,10 @@
 pub(crate) fn int_array(blob: &[u8]) -> Option<Vec<i64>> {
     const HEADER: &[u8] = b"bplist00";
     const TRAILER_LEN: usize = 32;
+    // A member list this long is corrupt, not real (KakaoTalk previews only a
+    // handful). Refusing it stops a local-DB fault from amplifying into a huge
+    // Vec / giant reconstructed chat name.
+    const MAX_ELEMENTS: usize = 256;
     if blob.len() < HEADER.len() + TRAILER_LEN || &blob[..HEADER.len()] != HEADER {
         return None;
     }
@@ -33,14 +37,25 @@ pub(crate) fn int_array(blob: &[u8]) -> Option<Vec<i64>> {
         return None;
     }
 
-    // Bounds-check the whole offset table up front.
+    // Layout: header | object area | offset table | trailer. The object area is
+    // [HEADER, offset_table_offset); the offset table must start after the header
+    // and end before the trailer. Anything else is malformed, not data.
+    let object_area_start = HEADER.len();
+    let content_end = blob.len() - TRAILER_LEN;
     let table_len = num_objects.checked_mul(offset_int_size)?;
-    if offset_table_offset.checked_add(table_len)? > blob.len() {
+    let table_end = offset_table_offset.checked_add(table_len)?;
+    if offset_table_offset < object_area_start || table_end > content_end {
         return None;
     }
+
+    // Resolve an object index to a byte offset, requiring it to land inside the
+    // object area (never the header, offset table, or trailer).
     let object_offset = |idx: usize| -> Option<usize> {
         let start = offset_table_offset + idx * offset_int_size;
-        be_uint(blob.get(start..start + offset_int_size)?).map(|value| value as usize)
+        let off = be_uint(blob.get(start..start + offset_int_size)?)? as usize;
+        (object_area_start..offset_table_offset)
+            .contains(&off)
+            .then_some(off)
     };
 
     // Root must be an array (marker high nibble 0xA).
@@ -49,11 +64,17 @@ pub(crate) fn int_array(blob: &[u8]) -> Option<Vec<i64>> {
         return None;
     }
     let (count, mut cursor) = collection_count(blob, root_offset)?;
+    if count > MAX_ELEMENTS {
+        return None;
+    }
 
-    // Cap only the pre-allocation, never the loop: a corrupt count that outruns
-    // the blob makes `blob.get(..)` return None and we bail, so there is no OOM.
-    let mut out = Vec::with_capacity(count.min(64));
+    let mut out = Vec::with_capacity(count);
     for _ in 0..count {
+        // Element refs are part of the array object and must stay in the object
+        // area, before the offset table.
+        if cursor.checked_add(object_ref_size)? > offset_table_offset {
+            return None;
+        }
         let obj_idx = be_uint(blob.get(cursor..cursor + object_ref_size)?)? as usize;
         cursor += object_ref_size;
         if obj_idx >= num_objects {
@@ -93,7 +114,8 @@ fn read_int(blob: &[u8], offset: usize) -> Option<i64> {
         return None;
     }
     let len = 1usize << power;
-    be_uint(blob.get(offset + 1..offset + 1 + len)?).map(|value| value as i64)
+    // Reject an 8-byte value above i64::MAX rather than wrapping it negative.
+    i64::try_from(be_uint(blob.get(offset + 1..offset + 1 + len)?)?).ok()
 }
 
 /// Big-endian unsigned read of 1..=8 bytes.
@@ -210,5 +232,41 @@ mod tests {
         for cut in 0..BPLIST_THREE.len() {
             let _ = int_array(&BPLIST_THREE[..cut]);
         }
+    }
+
+    #[test]
+    fn rejects_element_count_over_cap() {
+        // A well-formed header/trailer whose array count (via the 0xF overflow
+        // form) is 300 must be refused, not amplified. Layout: header, array
+        // marker `af` + 2-byte int 300, a 1-entry offset table, 32-byte trailer.
+        let blob: &[u8] = &[
+            0x62, 0x70, 0x6c, 0x69, 0x73, 0x74, 0x30, 0x30, // bplist00
+            0xaf, 0x11, 0x01, 0x2c, // array, overflow count int = 0x012c (300)
+            0x08, // offset table: object 0 at byte 8
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // trailer[0..6] unused
+            0x01, // offset_int_size
+            0x01, // object_ref_size
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // num_objects = 1
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // top_object = 0
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, // offset_table_offset = 12
+        ];
+        assert_eq!(int_array(blob), None);
+    }
+
+    #[test]
+    fn rejects_object_offset_into_trailer() {
+        // Corrupt a valid blob so its single offset-table entry points into the
+        // trailer instead of the object area. Must degrade to None.
+        let mut blob = BPLIST_SINGLE.to_vec();
+        let table_start = blob.len() - 32 + 24; // offset_table_offset lives here
+        let table_off = read_be(&blob[table_start..table_start + 8]);
+        // Point the first object offset at the trailer region.
+        blob[table_off] = (blob.len() - 4) as u8;
+        assert_eq!(int_array(&blob), None);
+    }
+
+    // Big-endian read helper for the corruption test above.
+    fn read_be(bytes: &[u8]) -> usize {
+        bytes.iter().fold(0usize, |acc, &b| (acc << 8) | b as usize)
     }
 }

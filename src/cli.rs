@@ -70,7 +70,7 @@ pub(crate) enum SearchCommand {
     Keyword {
         query: String,
         /// Maximum number of results to return.
-        #[arg(long, default_value_t = 10)]
+        #[arg(long, default_value_t = 10, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=100_000))]
         limit: usize,
         #[arg(long)]
         json: bool,
@@ -78,7 +78,7 @@ pub(crate) enum SearchCommand {
     Bm25 {
         query: String,
         /// Maximum number of results to return.
-        #[arg(long, default_value_t = 10)]
+        #[arg(long, default_value_t = 10, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=100_000))]
         limit: usize,
         #[arg(long)]
         json: bool,
@@ -86,7 +86,7 @@ pub(crate) enum SearchCommand {
     Semantic {
         query: String,
         /// Maximum number of results to return.
-        #[arg(long, default_value_t = 10)]
+        #[arg(long, default_value_t = 10, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=100_000))]
         limit: usize,
         #[arg(long)]
         json: bool,
