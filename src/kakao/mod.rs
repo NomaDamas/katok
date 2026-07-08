@@ -9,6 +9,10 @@
 pub mod auth;
 mod bplist;
 pub mod derive;
+pub mod media_crypto;
+pub mod media_paths;
+pub mod media_reader;
+pub mod media_resolver;
 pub mod reader;
 
 use std::path::PathBuf;
@@ -16,6 +20,7 @@ use std::path::PathBuf;
 use crate::{Error, Result};
 
 pub use auth::{probe_status, AuthOptions, ProbeStatus, ResolvedAuth};
+pub use media_reader::{read_media_frames_with_options, MediaQuery};
 pub use reader::{ChatRecord, ReaderOutput};
 
 /// Resolve auth and read every openable KakaoTalk database for `home`/`data_dir`.
