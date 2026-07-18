@@ -61,7 +61,7 @@ pub fn probe_database(path: &Path, key: &str) -> Result<bool> {
     }
 }
 
-fn open_database(path: &Path, key: &str) -> Result<Connection> {
+pub(crate) fn open_database(path: &Path, key: &str) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
