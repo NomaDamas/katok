@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 mod chunk_commands;
 mod freshness;
 mod index_commands;
+mod media_commands;
 mod permissions;
 mod source_adapter;
 
@@ -53,6 +54,7 @@ pub(crate) fn run(
         Commands::Search { command } => run_search(command, &config, &archive_path, &semantic_dir),
         Commands::Chunk { command } => chunk_commands::run(command, &archive_path),
         Commands::Source { command } => run_source(command, &config, &data_dir),
+        Commands::Media { command } => media_commands::run(command, &data_dir),
         Commands::Permissions { command } => run_permissions(command),
         Commands::Chunks { chat, json } => run_chunks(&chat, json, &archive_path),
         Commands::WipeIndex { yes, json } => run_wipe_index(yes, json, &semantic_dir),

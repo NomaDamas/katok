@@ -47,6 +47,10 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: SourceCommand,
     },
+    Media {
+        #[command(subcommand)]
+        command: MediaCommand,
+    },
     Permissions {
         #[command(subcommand)]
         command: PermissionsCommand,
@@ -122,6 +126,29 @@ pub(crate) enum SourceCommand {
         #[arg(long)]
         source: Option<String>,
         path: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum MediaCommand {
+    Get {
+        /// KakaoTalk chatId to read image messages from.
+        #[arg(long)]
+        chat: i64,
+        /// Optional KakaoTalk logId to extract one image message.
+        #[arg(long)]
+        log: Option<i64>,
+        /// Output directory for decrypted/fetched image files.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Disable CDN downloads and use only local cache/thumbnail/stub tiers.
+        #[arg(long)]
+        no_cdn: bool,
+        /// Maximum number of image messages to read from the room.
+        #[arg(long, default_value_t = 5000, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=100_000))]
+        limit: usize,
         #[arg(long)]
         json: bool,
     },

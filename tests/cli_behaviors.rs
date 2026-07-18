@@ -16,6 +16,20 @@ fn cli_help_identifies_katok_when_invoked() {
 }
 
 #[test]
+fn cli_media_get_help_documents_image_extraction_flags() {
+    let mut cmd = Command::cargo_bin("katok").expect("katok binary");
+    cmd.args(["media", "get", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("media get"))
+        .stdout(predicate::str::contains("--chat"))
+        .stdout(predicate::str::contains("--log"))
+        .stdout(predicate::str::contains("--out"))
+        .stdout(predicate::str::contains("--no-cdn"))
+        .stdout(predicate::str::contains("--json"));
+}
+
+#[test]
 fn cli_reports_macos_permission_panes_without_opening_settings_when_dry_run() {
     let mut cmd = Command::cargo_bin("katok").expect("katok binary");
     cmd.args([

@@ -107,6 +107,23 @@ katok chunk parent <chunk-id> --json
 - `chunk context`는 같은 채팅방의 바로 앞뒤 chunk를 보여줍니다.
 - `chunk parent`는 semantic search가 사용한 더 큰 parent window를 보여줍니다.
 
+카카오톡 이미지 메시지의 로컬 캐시를 추출하려면 media 명령을 사용합니다.
+
+```bash
+katok media get --chat <chat-id> --json
+katok media get --chat <chat-id> --log <log-id> --out ./katok-media --no-cdn --json
+```
+
+`media get`은 type 2 단일 사진과 type 27 앨범 프레임을 읽고, 각 프레임을 로컬 full `.img`, CDN presigned GET, 로컬 thumbnail `.thm`, stub 순서로 해석합니다. 이미지 추출 자체가 사용자가 `media get`을 실행해 opt in하는 기능이며, 이 명령에서 네트워크를 사용할 수 있는 유일한 동작은 attachment metadata의 CDN presigned GET입니다. CDN 응답은 `cs` SHA-1과 일치한 bytes만 저장하며, `--no-cdn`을 주면 CDN tier를 끄고 로컬 `.img`/`.thm`/stub만 사용합니다. 기본 출력 위치는 katok data directory 아래 `media/<chat-id>/`입니다.
+
+`--json` 출력 스키마의 주요 필드는 다음과 같습니다.
+
+- `chat_id`, `log_id`, `limit`, `output_dir`, `cdn_enabled`
+- `frame_count`: 읽은 이미지 frame 수
+- `records[]`: `logId`, `idx`, `w`, `h`, `cs`, `tier`, `tier_reason`, `path`, `sha1`, `sender`, `ts`
+- `errors[]`: tier 실패 관측값, `logId`, `idx`, `stage`, `path`, `error`
+- `tier_counts`: `full`, `cdn`, `thumb`, `stub` 별 개수
+
 ## 검색 방식
 
 `katok search keyword`는 빠르고 결정적인 부분 문자열 검색입니다. 정확한 단어, 이름, 계좌번호, 고유명사처럼 그대로 기억나는 값을 찾을 때 씁니다.
@@ -201,6 +218,7 @@ katok search semantic "회의 보고서" --json
 katok chunk get <chunk-id> --json
 katok chunk context <chunk-id> --json
 katok chunk parent <chunk-id> --json
+katok media get --chat <chat-id> --no-cdn --json
 katok wipe-index --yes --json
 ```
 
