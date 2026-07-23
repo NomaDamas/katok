@@ -67,6 +67,29 @@ pub(crate) enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Send a message into an already open KakaoTalk chat window (macOS only).
+    ///
+    /// Unlike every other subcommand this writes rather than reads, and it does so by driving
+    /// the running app's UI — there is no supported write path into the local archive. The
+    /// target window must already be open; KakaoTalk is never brought to the front.
+    #[cfg(target_os = "macos")]
+    Send {
+        /// Exact title of the open chat window. Note the self-chat window is titled with your
+        /// own nickname, not "나와의 채팅".
+        #[arg(long)]
+        room: String,
+        /// Message body. Reads stdin when omitted.
+        #[arg(long)]
+        text: Option<String>,
+        /// Send an image file instead of text. Mutually exclusive with --text.
+        #[arg(long, conflicts_with = "text")]
+        image: Option<PathBuf>,
+        /// List the chat windows currently open and exit without sending.
+        #[arg(long)]
+        list_windows: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

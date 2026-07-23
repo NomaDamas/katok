@@ -58,7 +58,67 @@ pub(crate) fn run(
         Commands::Permissions { command } => run_permissions(command),
         Commands::Chunks { chat, json } => run_chunks(&chat, json, &archive_path),
         Commands::WipeIndex { yes, json } => run_wipe_index(yes, json, &semantic_dir),
+        #[cfg(target_os = "macos")]
+        Commands::Send {
+            room,
+            text,
+            image,
+            list_windows,
+            json,
+        } => run_send(&room, text, image, list_windows, json),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn run_send(
+    room: &str,
+    text: Option<String>,
+    image: Option<PathBuf>,
+    list_windows: bool,
+    json: bool,
+) -> Result<()> {
+    use katok::kakao::ax_send;
+    use std::io::Read;
+
+    if list_windows {
+        let titles = ax_send::open_window_titles()?;
+        return print_payload(json, &serde_json::json!({ "open_windows": titles }));
+    }
+
+    if let Some(path) = image {
+        ax_send::send_image_to_open_window(room, &path)?;
+        // Report the file name only; the path can leak directory structure into logs.
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("(unnamed)");
+        return print_payload(
+            json,
+            &serde_json::json!({ "sent": true, "room": room, "image": name }),
+        );
+    }
+
+    let body = match text {
+        Some(t) => t,
+        None => {
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .context("failed to read message body from stdin")?;
+            buf
+        }
+    };
+    let body = body.trim_end_matches('\n');
+    if body.is_empty() {
+        anyhow::bail!("refusing to send an empty message");
+    }
+
+    ax_send::send_to_open_window(room, body)?;
+    // Never echo the body: sent content is as sensitive as anything else this crate handles.
+    print_payload(
+        json,
+        &serde_json::json!({ "sent": true, "room": room, "chars": body.chars().count() }),
+    )
 }
 
 fn run_permissions(command: PermissionsCommand) -> Result<()> {

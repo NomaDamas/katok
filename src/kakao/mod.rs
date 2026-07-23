@@ -7,6 +7,8 @@
 //! ids, timestamps, and status are ever emitted.
 
 pub mod auth;
+#[cfg(target_os = "macos")]
+pub mod ax_send;
 mod bplist;
 pub mod derive;
 pub mod media_crypto;
