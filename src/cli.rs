@@ -87,6 +87,19 @@ pub(crate) enum Commands {
         /// List the chat windows currently open and exit without sending.
         #[arg(long)]
         list_windows: bool,
+        /// List room names from the chat list (newest first) and exit without sending.
+        #[arg(long)]
+        list_rooms: bool,
+        /// Cap for --list-rooms.
+        #[arg(long, default_value_t = 40)]
+        limit: usize,
+        /// Resolve (and open) the room window but do not send. For verifying targeting safely.
+        #[arg(long)]
+        dry_run: bool,
+        /// Fail instead of opening the room when its window is closed. Use for automation that
+        /// must never touch the screen: opening a room briefly moves KakaoTalk's own windows.
+        #[arg(long)]
+        no_open: bool,
         #[arg(long)]
         json: bool,
     },
