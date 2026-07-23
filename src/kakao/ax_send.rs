@@ -51,6 +51,7 @@ const ROLE_TABLE: &str = "AXTable";
 
 const ATTR_FRONTMOST: &str = "AXFrontmost";
 const ATTR_ROWS: &str = "AXRows";
+const ATTR_FOCUSED: &str = "AXFocused";
 
 const ACTION_PRESS: &str = "AXPress";
 
@@ -355,7 +356,7 @@ pub fn send_image_to_open_window(room: &str, image_path: &Path) -> Result<(), Se
     std::thread::sleep(std::time::Duration::from_millis(250));
 
     if let Some(compose) = compose_box(window.as_raw()) {
-        let focus_key = CFString::new("AXFocused");
+        let focus_key = CFString::new(ATTR_FOCUSED);
         let yes = core_foundation::boolean::CFBoolean::true_value();
         unsafe {
             AXUIElementSetAttributeValue(
@@ -491,6 +492,21 @@ pub fn send_to_open_window(room: &str, text: &str) -> Result<(), SendError> {
 
     let compose =
         compose_box(window.as_raw()).ok_or_else(|| SendError::ComposeBoxNotFound(room.to_string()))?;
+
+    // Make the compose box the app's focused element before typing. Enter is delivered to
+    // KakaoTalk as a whole, and KakaoTalk routes it to whatever it considers focused — with
+    // several windows open that is often not this chat, and the message then sits in the box
+    // unsent. Setting AXFocused targets the element without activating the app, so this stays
+    // invisible to the user.
+    let focus_key = CFString::new(ATTR_FOCUSED);
+    let yes = core_foundation::boolean::CFBoolean::true_value();
+    unsafe {
+        AXUIElementSetAttributeValue(
+            compose.as_raw(),
+            focus_key.as_concrete_TypeRef(),
+            yes.as_CFTypeRef(),
+        )
+    };
 
     let key = CFString::new(ATTR_VALUE);
     let value = CFString::new(text);
