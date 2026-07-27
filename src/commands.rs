@@ -4,7 +4,7 @@ use crate::support::{dependency_status, print_payload};
 use anyhow::{Context, Result};
 use katok::{
     archive::Archive,
-    chunking::{rebuild_chunks_with_settings, ChunkSettings},
+    chunking::{rebuild_chunks_for_chats, rebuild_chunks_with_settings, ChunkSettings},
     config::KatokConfig,
     search::{bm25_search_with_snippet, keyword_search_with_snippet},
     semantic::{semantic_search_live_with_config, semantic_search_with_snippet},
@@ -248,14 +248,18 @@ fn run_sync(
         let upsert_messages = upsert_started.elapsed().as_millis();
 
         let rebuild_started = Instant::now();
-        report.chunks = rebuild_chunks_with_settings(
-            &archive,
-            ChunkSettings {
-                group_gap_seconds: config.chunk_gap_group_seconds,
-                direct_gap_seconds: config.chunk_gap_direct_seconds,
-            },
-        )
-        .context("rebuild chunks")?;
+        let settings = ChunkSettings {
+            group_gap_seconds: config.chunk_gap_group_seconds,
+            direct_gap_seconds: config.chunk_gap_direct_seconds,
+        };
+        // Recompute only the chats that changed. A first sync has no chunks yet, so it still
+        // needs the full pass; after that a quiet sync touches a handful of rooms.
+        report.chunks = if archive.chunk_count().context("count chunks")? == 0 {
+            rebuild_chunks_with_settings(&archive, settings).context("rebuild chunks")?
+        } else {
+            rebuild_chunks_for_chats(&archive, settings, &report.touched_chats)
+                .context("rebuild chunks")?
+        };
 
         report.timings_ms = SyncTimings {
             read_source,

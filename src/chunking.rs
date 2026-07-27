@@ -37,6 +37,25 @@ pub fn rebuild_chunks_with_settings(archive: &Archive, settings: ChunkSettings) 
     Ok(count)
 }
 
+/// Recompute chunks for `chat_ids` only, leaving other chats untouched.
+///
+/// Produces the same rows a full rebuild would: boundaries depend only on the previous message
+/// and never cross a chat, and `chunk_id` is derived from content rather than position.
+pub fn rebuild_chunks_for_chats(
+    archive: &Archive,
+    settings: ChunkSettings,
+    chat_ids: &[String],
+) -> Result<usize> {
+    if chat_ids.is_empty() {
+        return archive.chunk_count();
+    }
+    let messages = archive.raw_messages_for_chats(chat_ids)?;
+    let drafts = build_chunks(&messages, settings)?;
+    let parents = build_parent_windows(&drafts)?;
+    archive.replace_chunks_for_chats(chat_ids, &drafts, &parents)?;
+    archive.chunk_count()
+}
+
 fn build_chunks(messages: &[StoredMessage], settings: ChunkSettings) -> Result<Vec<ChunkDraft>> {
     let mut chunks = Vec::new();
     let mut current: Vec<StoredMessage> = Vec::new();

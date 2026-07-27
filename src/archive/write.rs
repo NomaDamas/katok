@@ -27,11 +27,19 @@ impl Archive {
         // than the newest one.
         let mut cursors: HashMap<&str, &DateTime<Utc>> = HashMap::new();
 
+        // Chats whose messages actually changed. Only these need their chunks recomputed;
+        // chunk boundaries never reach across chats, so the rest are provably untouched.
+        let mut touched_chats: Vec<String> = Vec::new();
+        let mut touched_seen: HashSet<&str> = HashSet::new();
+
         for message in messages {
             if seen_chats.insert(message.chat_id.as_str()) {
                 self.upsert_chat(message)?;
             }
             let change = self.upsert_message(message)?;
+            if change != MessageChange::Unchanged && touched_seen.insert(message.chat_id.as_str()) {
+                touched_chats.push(message.chat_id.clone());
+            }
             inserted += usize::from(change == MessageChange::Inserted);
             updated += usize::from(change == MessageChange::Updated);
             cursors
@@ -53,9 +61,59 @@ impl Archive {
             updated_messages: updated,
             total_messages: self.count_rows("messages")?,
             chunks: self.count_rows("chunks")?,
+            rebuilt_chats: touched_chats.len(),
             // Filled in by the caller, which is the only layer that sees every stage.
             timings_ms: Default::default(),
+            touched_chats,
         })
+    }
+
+    /// Drop every chunk artifact belonging to `chat_id`.
+    ///
+    /// The FTS rows go first: they are located through `chunks`, which the last statement
+    /// removes.
+    fn delete_chat_chunks(&self, chat_id: &str) -> Result<()> {
+        for sql in [
+            "DELETE FROM chunks_fts
+             WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE chat_id = ?1)",
+            "DELETE FROM chunk_messages
+             WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE chat_id = ?1)",
+            "DELETE FROM chunk_parent_refs
+             WHERE child_chunk_id IN (SELECT chunk_id FROM chunks WHERE chat_id = ?1)
+                OR parent_chunk_id IN (SELECT chunk_id FROM chunks WHERE chat_id = ?1)",
+            "DELETE FROM parent_chunk_children
+             WHERE parent_id IN (SELECT parent_id FROM parent_chunks WHERE chat_id = ?1)",
+            "DELETE FROM parent_chunks WHERE chat_id = ?1",
+            "DELETE FROM chunks WHERE chat_id = ?1",
+        ] {
+            self.conn
+                .execute(sql, params![chat_id])
+                .map_err(Error::Sql)?;
+        }
+        Ok(())
+    }
+
+    /// Replace the chunks of `chat_ids` only, leaving every other chat's rows in place.
+    ///
+    /// Safe because a chunk boundary is decided by looking at the previous message alone and
+    /// never reaches across chats, so recomputing one chat yields byte-identical rows to a full
+    /// rebuild — `chunk_id` is derived from content, not from position in the archive.
+    pub fn replace_chunks_for_chats(
+        &self,
+        chat_ids: &[String],
+        chunks: &[ChunkDraft],
+        parents: &[ParentChunkDraft],
+    ) -> Result<()> {
+        for chat_id in chat_ids {
+            self.delete_chat_chunks(chat_id)?;
+        }
+        for chunk in chunks {
+            self.insert_chunk(chunk)?;
+        }
+        for parent in parents {
+            self.insert_parent_chunk(parent)?;
+        }
+        self.rebuild_parent_refs()
     }
 
     pub fn replace_chunks(
@@ -231,6 +289,11 @@ impl Archive {
                 .map_err(Error::Sql)?;
         }
         Ok(())
+    }
+
+    /// Number of chunk rows currently in the archive.
+    pub fn chunk_count(&self) -> Result<usize> {
+        self.count_rows("chunks")
     }
 
     fn count_rows(&self, table: &str) -> Result<usize> {
