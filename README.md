@@ -191,6 +191,8 @@ katok chunk get <chunk-id> --json
 
 `katok sync --source macos`는 Rust 코드로 카카오톡 macOS 설치를 직접 읽습니다. 런타임에 Python, `kakaocli`, 별도 helper 서버가 필요 없습니다.
 
+sync는 자주 실행해도 되도록 증분으로 동작합니다. 메시지가 실제로 바뀐 채팅방의 chunk만 다시 계산하므로, 40만 건 아카이브에서도 새 메시지가 적은 sync는 몇 초 안에 끝납니다. 빈 아카이브에 처음 실행하는 sync만 예외적으로 오래 걸립니다. 출력에 `rebuilt_chats`와 단계별 소요 시간(`timings_ms`의 `read_source`, `upsert_messages`, `rebuild_chunks`)이 포함되므로 느린 실행의 원인을 단계 단위로 확인할 수 있습니다.
+
 요구사항:
 
 - 터미널 앱이 `~/Library/Containers/com.kakao.KakaoTalkMac/` 아래 파일을 읽을 수 있도록 전체 디스크 접근 권한을 받아야 합니다.

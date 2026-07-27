@@ -67,7 +67,9 @@ Use `katok chunk context <chunk-id> --json` to inspect the immediate previous an
 
 `katok index` runs the local `embeddinggemma-300m-q4` embedder in-process by default. Do not ask the user to start a Python, Jina, TEI, or local HTTP embedding server. Use `KATOK_EMBEDDER=mock` only for synthetic QA and `KATOK_EMBEDDER=local-test` only when you need deterministic local vector tests without downloading the model.
 
-The index never follows the KakaoTalk database on its own, so a search only ever reflects the last sync. Run `katok sync --source macos --json` before the first query of a session and before any question about recent messages; it is incremental, so later runs take seconds. Skipping it does not return zero results, it silently returns a stale set. Freshness also depends on KakaoTalk itself running (`pgrep -x KakaoTalk`), because the source database receives new messages only while the app is up.
+The index never follows the KakaoTalk database on its own, so a search only ever reflects the last sync. Run `katok sync --source macos --json` before the first query of a session and before any question about recent messages. Skipping it does not return zero results, it silently returns a stale set. Freshness also depends on KakaoTalk itself running (`pgrep -x KakaoTalk`), because the source database receives new messages only while the app is up.
+
+Sync is cheap enough to run often: on a 400k-message archive a quiet sync takes a few seconds, because only the chats whose messages changed have their chunks recomputed. The first sync on an empty archive is the exception and takes far longer. The payload reports `rebuilt_chats` and a `timings_ms` breakdown (`read_source`, `upsert_messages`, `rebuild_chunks`), so a slow run can be attributed to a stage instead of guessed at.
 
 ## Field Notes
 
