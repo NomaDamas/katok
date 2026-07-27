@@ -8,6 +8,7 @@ use katok::{
     config::KatokConfig,
     search::{bm25_search_with_snippet, keyword_search_with_snippet},
     semantic::{semantic_search_live_with_config, semantic_search_with_snippet},
+    transcript::export_transcript,
     types::SyncTimings,
 };
 use std::path::{Path, PathBuf};
@@ -59,6 +60,12 @@ pub(crate) fn run(
         Commands::Media { command } => media_commands::run(command, &data_dir),
         Commands::Permissions { command } => run_permissions(command),
         Commands::Chunks { chat, json } => run_chunks(&chat, json, &archive_path),
+        Commands::Transcript {
+            chat,
+            since,
+            out,
+            json,
+        } => run_transcript(&chat, since.as_deref(), out, json, &archive_path, &data_dir),
         Commands::WipeIndex { yes, json } => run_wipe_index(yes, json, &semantic_dir),
         #[cfg(target_os = "macos")]
         Commands::Send {
@@ -269,6 +276,22 @@ fn run_sync(
         Ok::<_, anyhow::Error>(report)
     })?;
     freshness::record_sync(data_dir, source, report.total_messages, report.chunks)?;
+    print_payload(json, &report)
+}
+
+fn run_transcript(
+    chat: &str,
+    since: Option<&str>,
+    out: Option<PathBuf>,
+    json: bool,
+    archive_path: &Path,
+    data_dir: &Path,
+) -> Result<()> {
+    let archive = Archive::open(archive_path).context("open archive")?;
+    // Transcripts hold raw message bodies, so they default under the katok data dir rather than
+    // the working directory, where they could be committed by accident.
+    let out_dir = out.unwrap_or_else(|| data_dir.join("transcripts"));
+    let report = export_transcript(&archive, chat, since, &out_dir).context("export transcript")?;
     print_payload(json, &report)
 }
 

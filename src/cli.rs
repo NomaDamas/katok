@@ -67,6 +67,23 @@ pub(crate) enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Export one chat's raw messages over a time range as a Markdown transcript.
+    ///
+    /// Reads the archive, not the live KakaoTalk database, so run `sync` first when the tail
+    /// matters. A range holding no messages writes no file.
+    Transcript {
+        /// chat_id to export, as reported by `source chats` or a search hit.
+        #[arg(long)]
+        chat: String,
+        /// Only include messages at or after this RFC3339 timestamp.
+        #[arg(long)]
+        since: Option<String>,
+        /// Directory to write the transcript into.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Send a message into an already open KakaoTalk chat window (macOS only).
     ///
     /// Unlike every other subcommand this writes rather than reads, and it does so by driving

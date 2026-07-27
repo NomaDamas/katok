@@ -147,6 +147,33 @@ impl Archive {
         Ok(rows)
     }
 
+    /// Messages of one chat in send order, optionally from `since` (RFC3339) onward.
+    ///
+    /// Timestamps are stored as RFC3339 text, which sorts and compares lexicographically in the
+    /// same order as the instants it encodes, so the range filter needs no conversion.
+    pub fn messages_for_transcript(
+        &self,
+        chat_id: &str,
+        since: Option<&str>,
+    ) -> Result<Vec<StoredMessage>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT account_hash, chat_id, chat_name, chat_type, message_id,
+                    sender_nickname, timestamp, text, message_type
+             FROM messages
+             WHERE chat_id = ?1 AND (?2 IS NULL OR timestamp >= ?2)
+             ORDER BY timestamp, message_id",
+            )
+            .map_err(Error::Sql)?;
+        let rows = stmt
+            .query_map(params![chat_id, since], StoredMessage::from_row)
+            .map_err(Error::Sql)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Sql)?;
+        Ok(rows)
+    }
+
     fn chunk_messages(&self, chunk_id: &str) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
