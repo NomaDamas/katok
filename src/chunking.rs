@@ -24,14 +24,16 @@ impl Default for ChunkSettings {
     }
 }
 
-impl PartialEq for ChunkSettings {
-    fn eq(&self, other: &Self) -> bool {
-        self.group_gap_seconds == other.group_gap_seconds
-            && self.direct_gap_seconds == other.direct_gap_seconds
-    }
-}
-
-impl Eq for ChunkSettings {}
+/// Bump when the chunk or parent-window boundary rules change.
+///
+/// Chunking is scoped to the chats that changed, so a logic change would otherwise only reach
+/// rooms that happen to receive a message and quiet rooms would keep artifacts from the old
+/// algorithm forever — the same failure the gap settings had. Recording this alongside the gap
+/// values makes an upgraded binary rebuild everything once.
+///
+/// Covers `should_start_new_chunk`, `should_start_parent_window`, the parent-window size limits,
+/// and the `stable_chunk_id` salt.
+pub const CHUNKER_VERSION: i64 = 1;
 
 pub fn rebuild_chunks(archive: &Archive) -> Result<usize> {
     rebuild_chunks_with_settings(archive, ChunkSettings::default())

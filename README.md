@@ -191,7 +191,7 @@ katok chunk get <chunk-id> --json
 
 `katok sync --source macos`는 Rust 코드로 카카오톡 macOS 설치를 직접 읽습니다. 런타임에 Python, `kakaocli`, 별도 helper 서버가 필요 없습니다.
 
-sync는 자주 실행해도 되도록 증분으로 동작합니다. 메시지가 실제로 바뀐 채팅방의 chunk만 다시 계산하므로, 40만 건 아카이브에서도 새 메시지가 적은 sync는 몇 초 안에 끝납니다. 빈 아카이브에 처음 실행하는 sync만 예외적으로 오래 걸립니다. 출력에 `rebuilt_chats`와 단계별 소요 시간(`timings_ms`의 `read_source`, `upsert_messages`, `rebuild_chunks`)이 포함되므로 느린 실행의 원인을 단계 단위로 확인할 수 있습니다.
+sync는 자주 실행해도 되도록 증분으로 동작합니다. 메시지가 실제로 바뀐 채팅방의 chunk만 다시 계산하므로, 40만 건 아카이브에서도 새 메시지가 적은 sync는 몇 초 안에 끝납니다. 전량을 다시 계산하는 경우는 두 가지입니다. 빈 아카이브에 처음 실행하는 sync, 그리고 `chunk_gap_group_seconds`/`chunk_gap_direct_seconds` 를 바꾼 뒤 처음 실행하는 sync(저장된 chunk 전부가 무효가 됩니다). 출력에 `rebuilt_chats`와 단계별 소요 시간(`timings_ms`의 `read_source`, `upsert_messages`, `rebuild_chunks`)이 포함되므로 느린 실행의 원인을 단계 단위로 확인할 수 있습니다.
 
 요구사항:
 
@@ -205,6 +205,8 @@ fixture로 개발/테스트할 때는 실제 카카오톡 설치가 필요 없�
 katok source chats --source fixture tests/fixtures/kakao/replies.jsonl --json
 katok sync --source fixture tests/fixtures/kakao/replies.jsonl --json
 ```
+
+합성 데이터로 실행할 때는 `--data-dir <임시경로>` 플래그로 반드시 격리하세요. `KATOK_DATA_DIR` 환경변수는 없습니다. 설정해도 조용히 무시되고 실제 아카이브에 기록됩니다.
 
 ## CLI 명령 요약
 
@@ -220,9 +222,13 @@ katok search semantic "회의 보고서" --json
 katok chunk get <chunk-id> --json
 katok chunk context <chunk-id> --json
 katok chunk parent <chunk-id> --json
+katok transcript --chat <chat-id> --json
+katok transcript --chat <chat-id> --since 2026-07-20T00:00:00+09:00 --json
 katok media get --chat <chat-id> --no-cdn --json
 katok wipe-index --yes --json
 ```
+
+`katok transcript`는 한 채팅방에서 실제로 오간 말을 시간 순서대로 Markdown 파일로 내보냅니다. 검색이 "어떤 chunk가 관련 있나"에 답한다면 이 명령은 "무슨 말이 오갔나"에 답하므로, 방 하나를 밀린 채로 따라 읽을 때 씁니다. 라이브 카카오톡 DB가 아니라 아카이브를 읽으므로 최근 대화가 필요하면 `sync`를 먼저 실행합니다. 범위에 메시지가 없으면 파일을 만들지 않고, 파일 이름에 message id 범위가 들어가므로 나중 실행이 이전 결과를 덮어쓰지 않습니다. 카카오톡 시스템 메시지(입장·퇴장·초대)는 아카이브에는 남고 transcript에서만 빠집니다.
 
 권한 진단이 필요할 때만:
 

@@ -4,7 +4,9 @@ use crate::support::{dependency_status, print_payload};
 use anyhow::{Context, Result};
 use katok::{
     archive::Archive,
-    chunking::{rebuild_chunks_for_chats, rebuild_chunks_with_settings, ChunkSettings},
+    chunking::{
+        rebuild_chunks_for_chats, rebuild_chunks_with_settings, ChunkSettings, CHUNKER_VERSION,
+    },
     config::KatokConfig,
     search::{bm25_search_with_snippet, keyword_search_with_snippet},
     semantic::{semantic_search_live_with_config, semantic_search_with_snippet},
@@ -266,8 +268,12 @@ fn run_sync(
         let stored_settings = archive
             .stored_chunk_settings()
             .context("read chunk settings")?;
-        let settings_changed =
-            stored_settings != Some((settings.group_gap_seconds, settings.direct_gap_seconds));
+        let settings_changed = stored_settings
+            != Some((
+                settings.group_gap_seconds,
+                settings.direct_gap_seconds,
+                CHUNKER_VERSION,
+            ));
         report.chunks = if archive.chunk_count().context("count chunks")? == 0 || settings_changed {
             rebuild_chunks_with_settings(&archive, settings).context("rebuild chunks")?
         } else {
@@ -275,7 +281,11 @@ fn run_sync(
                 .context("rebuild chunks")?
         };
         archive
-            .record_chunk_settings(settings.group_gap_seconds, settings.direct_gap_seconds)
+            .record_chunk_settings(
+                settings.group_gap_seconds,
+                settings.direct_gap_seconds,
+                CHUNKER_VERSION,
+            )
             .context("record chunk settings")?;
 
         report.timings_ms = SyncTimings {

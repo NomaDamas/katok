@@ -305,13 +305,14 @@ impl Archive {
         self.count_rows("chunks")
     }
 
-    /// The gap settings the stored chunks were built with, if any have been recorded.
-    pub fn stored_chunk_settings(&self) -> Result<Option<(i64, i64)>> {
+    /// The settings and chunker version the stored chunks were built with, if recorded.
+    pub fn stored_chunk_settings(&self) -> Result<Option<(i64, i64, i64)>> {
         self.conn
             .query_row(
-                "SELECT group_gap_seconds, direct_gap_seconds FROM chunk_settings WHERE id = 1",
+                "SELECT group_gap_seconds, direct_gap_seconds, chunker_version
+                 FROM chunk_settings WHERE id = 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
             .map_err(Error::Sql)
@@ -322,15 +323,18 @@ impl Archive {
         &self,
         group_gap_seconds: i64,
         direct_gap_seconds: i64,
+        chunker_version: i64,
     ) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO chunk_settings(id, group_gap_seconds, direct_gap_seconds)
-             VALUES (1, ?1, ?2)
+                "INSERT INTO chunk_settings
+                 (id, group_gap_seconds, direct_gap_seconds, chunker_version)
+             VALUES (1, ?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET
                  group_gap_seconds = excluded.group_gap_seconds,
-                 direct_gap_seconds = excluded.direct_gap_seconds",
-                params![group_gap_seconds, direct_gap_seconds],
+                 direct_gap_seconds = excluded.direct_gap_seconds,
+                 chunker_version = excluded.chunker_version",
+                params![group_gap_seconds, direct_gap_seconds, chunker_version],
             )
             .map_err(Error::Sql)?;
         Ok(())

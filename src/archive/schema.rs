@@ -32,7 +32,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS chunk_settings (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             group_gap_seconds INTEGER NOT NULL,
-            direct_gap_seconds INTEGER NOT NULL
+            direct_gap_seconds INTEGER NOT NULL,
+            chunker_version INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS chunks (
             chunk_id TEXT PRIMARY KEY,
@@ -84,5 +85,38 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
             USING fts5(chunk_id UNINDEXED, text);",
     )
+    .map_err(Error::Sql)?;
+
+    // `CREATE TABLE IF NOT EXISTS` leaves an archive that predates a column alone, so added
+    // columns need an explicit step. Defaulting to 0 makes every such archive read as drift,
+    // which rebuilds its chunks once under the current chunker — the safe direction.
+    add_column_if_missing(
+        conn,
+        "chunk_settings",
+        "chunker_version",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(Error::Sql)?;
+    let existing = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(Error::Sql)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Error::Sql)?;
+    if existing.iter().any(|name| name == column) {
+        return Ok(());
+    }
+    conn.execute_batch(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+    ))
     .map_err(Error::Sql)
 }

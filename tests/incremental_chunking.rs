@@ -7,6 +7,7 @@ use katok::{
     archive::Archive,
     chunking::{
         rebuild_chunks, rebuild_chunks_for_chats, rebuild_chunks_with_settings, ChunkSettings,
+        CHUNKER_VERSION,
     },
     fixture::read_fixture,
     types::RawMessage,
@@ -127,17 +128,31 @@ fn a_gap_settings_change_is_recorded_so_sync_can_notice_the_drift() {
         "a fresh archive has recorded nothing yet, which must read as drift"
     );
 
-    archive.record_chunk_settings(600, 1_800).expect("record");
+    archive
+        .record_chunk_settings(600, 1_800, CHUNKER_VERSION)
+        .expect("record");
     assert_eq!(
         archive.stored_chunk_settings().expect("read settings"),
-        Some((600, 1_800))
+        Some((600, 1_800, CHUNKER_VERSION))
     );
 
     // Re-recording different values overwrites rather than accumulating.
-    archive.record_chunk_settings(120, 300).expect("re-record");
+    archive
+        .record_chunk_settings(120, 300, CHUNKER_VERSION)
+        .expect("re-record");
     assert_eq!(
         archive.stored_chunk_settings().expect("read settings"),
-        Some((120, 300))
+        Some((120, 300, CHUNKER_VERSION))
+    );
+
+    // A chunker change reads as drift even when the gaps are untouched, which is what stops a
+    // logic upgrade from reaching only the rooms that happen to receive a message.
+    archive
+        .record_chunk_settings(120, 300, CHUNKER_VERSION + 1)
+        .expect("record newer chunker");
+    assert_ne!(
+        archive.stored_chunk_settings().expect("read settings"),
+        Some((120, 300, CHUNKER_VERSION))
     );
 }
 
