@@ -1,6 +1,6 @@
 ---
 name: katok
-description: Search local KakaoTalk keyword, BM25, and EmbeddingGemma vector indexes through the katok CLI.
+description: Search local KakaoTalk keyword, BM25, and EmbeddingGemma vector indexes through the katok CLI, list rooms, export a room's chunks, and extract image attachments.
 ---
 
 # katok
@@ -26,12 +26,19 @@ katok doctor --macos-probe --json        # explicit macOS permission/app-data pr
 katok sync --source macos --json          # reads live macOS KakaoTalk (needs Full Disk Access)
 katok sync --json                         # uses source_adapter from config
 katok index --json                        # builds local EmbeddingGemma vector index
+katok index --full --json                 # full rebuild instead of incremental
+katok wipe-index --yes                    # drops the local index
+katok source chats --source macos --json  # lists rooms with their chat ids
 katok search keyword "검색어" --json
 katok search bm25 "검색어" --json
 katok search semantic "지난 회의 보고서" --json
 katok chunk get <chunk-id> --json
+katok chunk get <chunk-id> --redact --json
 katok chunk context <chunk-id> --json
 katok chunk parent <chunk-id> --json
+katok chunks --chat <chat-id> --json      # every chunk in one room (metadata only)
+katok media get --chat <chat-id> --out <dir> --json   # extracts image attachments
+katok media get --chat <chat-id> --out <dir> --no-cdn --json   # local tiers only
 ```
 
 For synthetic QA only:
@@ -59,6 +66,24 @@ KATOK_EMBEDDER=mock katok index --json
 Use `katok chunk context <chunk-id> --json` to inspect the immediate previous and next micro chunks in the same chat. Use `katok chunk parent <chunk-id> --json` to jump from a micro chunk to its larger 5-minute same-chat window parent chunk. Semantic search returns parent-window hits with `child_chunk_ids`; use these chunk commands to navigate from broad context back to exact messages.
 
 `katok index` runs the local `embeddinggemma-300m-q4` embedder in-process by default. Do not ask the user to start a Python, Jina, TEI, or local HTTP embedding server. Use `KATOK_EMBEDDER=mock` only for synthetic QA and `KATOK_EMBEDDER=local-test` only when you need deterministic local vector tests without downloading the model.
+
+The index never follows the KakaoTalk database on its own, so a search only ever reflects the last sync. Run `katok sync --source macos --json` before the first query of a session and before any question about recent messages; it is incremental, so later runs take seconds. Skipping it does not return zero results, it silently returns a stale set. Freshness also depends on KakaoTalk itself running (`pgrep -x KakaoTalk`), because the source database receives new messages only while the app is up.
+
+## Field Notes
+
+- Most group rooms come back as a `chat-<id>` placeholder rather than a real title, because the source database does not always carry the room name. Grepping room names will not find them.
+- To locate a room whose title is a placeholder, search for a term used inside it and group the hits by `chat_name`. The `chat_id` holding the most hits is that room. Each hit carries `chunk_id`, `chat_name`, `sender_nickname`, `started_at`, and `snippet`.
+- `katok chunks --chat <chat-id>` returns chunk metadata only, never `text`. To export a whole room, collect the chunk ids and run `katok chunk get` per chunk, then assemble in timestamp order.
+- `katok chunk get --redact` masks the entire `text`, not only the PII inside it. Use it for a line you must quote, not for a readable export.
+- KakaoTalk system feed entries (invite, join, leave) arrive as JSON strings such as `{"inviter":...}` or `{"member":...,"feedType":N}`. Filter them out of anything a person will read.
+
+## Image Attachments
+
+`katok media get --chat <chat-id> --out <dir>` resolves each image message through four tiers in order: the decrypted local `.img` cache, a GET of the attachment's own presigned CDN URL verified by SHA-1, the decrypted `.thm` thumbnail, and finally a metadata stub. That CDN GET is the only network access anywhere in the CLI, and `--no-cdn` disables it so resolution stays entirely local.
+
+## Related Skills
+
+`katok send` is documented separately in `skills/katok-send`. It is the only subcommand that writes, and it does so by driving the running app's UI rather than the local archive.
 
 ## Platform
 
