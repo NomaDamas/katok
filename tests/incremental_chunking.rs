@@ -5,7 +5,9 @@
 
 use katok::{
     archive::Archive,
-    chunking::{rebuild_chunks, rebuild_chunks_for_chats, ChunkSettings},
+    chunking::{
+        rebuild_chunks, rebuild_chunks_for_chats, rebuild_chunks_with_settings, ChunkSettings,
+    },
     fixture::read_fixture,
     types::RawMessage,
 };
@@ -110,6 +112,67 @@ fn per_chat_rebuild_matches_a_full_rebuild_of_the_same_archive() {
 }
 
 #[test]
+fn a_gap_settings_change_is_recorded_so_sync_can_notice_the_drift() {
+    // Scoping the rebuild to changed chats means a settings change would otherwise only reach
+    // rooms that happen to receive a message. sync compares the recorded settings against the
+    // configured ones and takes the full path when they differ; this pins the recording half,
+    // which is what makes that comparison possible.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = Archive::open(&dir.path().join("archive.sqlite3")).expect("open archive");
+    archive.sync_messages(&fixture_messages()).expect("sync");
+
+    assert_eq!(
+        archive.stored_chunk_settings().expect("read settings"),
+        None,
+        "a fresh archive has recorded nothing yet, which must read as drift"
+    );
+
+    archive.record_chunk_settings(600, 1_800).expect("record");
+    assert_eq!(
+        archive.stored_chunk_settings().expect("read settings"),
+        Some((600, 1_800))
+    );
+
+    // Re-recording different values overwrites rather than accumulating.
+    archive.record_chunk_settings(120, 300).expect("re-record");
+    assert_eq!(
+        archive.stored_chunk_settings().expect("read settings"),
+        Some((120, 300))
+    );
+}
+
+#[test]
+fn different_gap_settings_produce_different_chunks() {
+    // The reason the drift check has to exist: the same messages chunk differently under
+    // different gaps, so stale settings mean stale boundaries.
+    let messages = synthetic_conversation();
+
+    let wide_dir = tempfile::tempdir().expect("tempdir");
+    let wide = Archive::open(&wide_dir.path().join("archive.sqlite3")).expect("open archive");
+    wide.sync_messages(&messages).expect("sync");
+    rebuild_chunks_with_settings(&wide, ChunkSettings::default()).expect("wide rebuild");
+
+    let narrow_dir = tempfile::tempdir().expect("tempdir");
+    let narrow = Archive::open(&narrow_dir.path().join("archive.sqlite3")).expect("open archive");
+    narrow.sync_messages(&messages).expect("sync");
+    rebuild_chunks_with_settings(
+        &narrow,
+        ChunkSettings {
+            // Below the 60s spacing of the synthetic run, so every message stands alone.
+            group_gap_seconds: 30,
+            direct_gap_seconds: 30,
+        },
+    )
+    .expect("narrow rebuild");
+
+    assert_ne!(
+        snapshot(wide.connection()),
+        snapshot(narrow.connection()),
+        "gap settings must change the resulting chunks, or the drift check guards nothing"
+    );
+}
+
+#[test]
 fn rebuilding_one_chat_leaves_the_other_chats_untouched() {
     let messages = fixture_messages();
     let mut chats: Vec<String> = messages.iter().map(|m| m.chat_id.clone()).collect();
@@ -138,9 +201,9 @@ fn rebuilding_one_chat_leaves_the_other_chats_untouched() {
 /// A conversation long enough to be split mid-chunk.
 ///
 /// Chat `A` is one uninterrupted run by one sender 60s apart, so the whole run is a single chunk
-/// under the 600s group gap — splitting it leaves an open chunk that the second wave must extend
-/// rather than start afresh. Chat `B` never appears in the second wave, so it also proves the
-/// scoped rebuild leaves quiet chats alone.
+/// under the 600s group gap — splitting it at index 8 leaves an open chunk that the second wave
+/// must extend rather than start afresh. Chat `B` sits entirely past the split, so the second
+/// wave introduces a chat the first wave never saw.
 fn synthetic_conversation() -> Vec<RawMessage> {
     let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
         .expect("base timestamp")

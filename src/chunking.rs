@@ -24,6 +24,15 @@ impl Default for ChunkSettings {
     }
 }
 
+impl PartialEq for ChunkSettings {
+    fn eq(&self, other: &Self) -> bool {
+        self.group_gap_seconds == other.group_gap_seconds
+            && self.direct_gap_seconds == other.direct_gap_seconds
+    }
+}
+
+impl Eq for ChunkSettings {}
+
 pub fn rebuild_chunks(archive: &Archive) -> Result<usize> {
     rebuild_chunks_with_settings(archive, ChunkSettings::default())
 }

@@ -26,6 +26,14 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             source_id TEXT PRIMARY KEY,
             cursor_value TEXT NOT NULL
         );
+        -- The settings the current chunk rows were built with. Chunking is now scoped to the
+        -- chats that changed, so a settings change would otherwise only reach rooms that happen
+        -- to receive a message; recording them lets sync notice the drift and rebuild in full.
+        CREATE TABLE IF NOT EXISTS chunk_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            group_gap_seconds INTEGER NOT NULL,
+            direct_gap_seconds INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS chunks (
             chunk_id TEXT PRIMARY KEY,
             account_hash TEXT NOT NULL,

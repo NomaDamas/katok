@@ -259,14 +259,24 @@ fn run_sync(
             group_gap_seconds: config.chunk_gap_group_seconds,
             direct_gap_seconds: config.chunk_gap_direct_seconds,
         };
-        // Recompute only the chats that changed. A first sync has no chunks yet, so it still
-        // needs the full pass; after that a quiet sync touches a handful of rooms.
-        report.chunks = if archive.chunk_count().context("count chunks")? == 0 {
+        // Recompute only the chats that changed. Two cases still need the full pass: a first
+        // sync has no chunks to scope to, and a gap-settings change invalidates every existing
+        // chunk. Without the second check a settings change would only ever reach rooms that
+        // happened to receive a message, leaving the rest on the old boundaries forever.
+        let stored_settings = archive
+            .stored_chunk_settings()
+            .context("read chunk settings")?;
+        let settings_changed =
+            stored_settings != Some((settings.group_gap_seconds, settings.direct_gap_seconds));
+        report.chunks = if archive.chunk_count().context("count chunks")? == 0 || settings_changed {
             rebuild_chunks_with_settings(&archive, settings).context("rebuild chunks")?
         } else {
             rebuild_chunks_for_chats(&archive, settings, &report.touched_chats)
                 .context("rebuild chunks")?
         };
+        archive
+            .record_chunk_settings(settings.group_gap_seconds, settings.direct_gap_seconds)
+            .context("record chunk settings")?;
 
         report.timings_ms = SyncTimings {
             read_source,

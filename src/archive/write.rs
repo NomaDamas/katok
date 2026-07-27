@@ -4,7 +4,7 @@ use crate::{
     Error, Result,
 };
 use chrono::{DateTime, Utc};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,6 +303,37 @@ impl Archive {
     /// Number of chunk rows currently in the archive.
     pub fn chunk_count(&self) -> Result<usize> {
         self.count_rows("chunks")
+    }
+
+    /// The gap settings the stored chunks were built with, if any have been recorded.
+    pub fn stored_chunk_settings(&self) -> Result<Option<(i64, i64)>> {
+        self.conn
+            .query_row(
+                "SELECT group_gap_seconds, direct_gap_seconds FROM chunk_settings WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Error::Sql)
+    }
+
+    /// Record the settings the current chunk rows were built with.
+    pub fn record_chunk_settings(
+        &self,
+        group_gap_seconds: i64,
+        direct_gap_seconds: i64,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO chunk_settings(id, group_gap_seconds, direct_gap_seconds)
+             VALUES (1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET
+                 group_gap_seconds = excluded.group_gap_seconds,
+                 direct_gap_seconds = excluded.direct_gap_seconds",
+                params![group_gap_seconds, direct_gap_seconds],
+            )
+            .map_err(Error::Sql)?;
+        Ok(())
     }
 
     fn count_rows(&self, table: &str) -> Result<usize> {
