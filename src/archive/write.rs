@@ -142,7 +142,7 @@ impl Archive {
 
     fn upsert_chat(&self, message: &RawMessage) -> Result<()> {
         self.conn
-            .execute(
+            .prepare_cached(
                 "INSERT INTO chats(chat_id, chat_name, chat_type)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(chat_id) DO UPDATE SET
@@ -150,8 +150,13 @@ impl Archive {
                  chat_type = excluded.chat_type
              WHERE chats.chat_name <> excluded.chat_name
                 OR chats.chat_type <> excluded.chat_type",
-                params![message.chat_id, message.chat_name, message.chat_type],
             )
+            .map_err(Error::Sql)?
+            .execute(params![
+                message.chat_id,
+                message.chat_name,
+                message.chat_type
+            ])
             .map_err(Error::Sql)?;
         Ok(())
     }
@@ -160,7 +165,7 @@ impl Archive {
         let exists = self.message_exists(message)?;
         let changed = self
             .conn
-            .execute(
+            .prepare_cached(
                 "INSERT INTO messages
              (account_hash, chat_id, chat_name, chat_type, message_id, sender_id,
               sender_nickname, timestamp, text, message_type, reply_to_message_id)
@@ -174,20 +179,21 @@ impl Archive {
                 OR messages.chat_type <> excluded.chat_type
                 OR messages.sender_nickname <> excluded.sender_nickname
                 OR messages.reply_to_message_id IS NOT excluded.reply_to_message_id",
-                params![
-                    message.account_hash,
-                    message.chat_id,
-                    message.chat_name,
-                    message.chat_type,
-                    message.message_id,
-                    message.sender_id,
-                    message.sender_nickname,
-                    message.timestamp.to_rfc3339(),
-                    message.text,
-                    message.message_type,
-                    message.reply_to_message_id
-                ],
             )
+            .map_err(Error::Sql)?
+            .execute(params![
+                message.account_hash,
+                message.chat_id,
+                message.chat_name,
+                message.chat_type,
+                message.message_id,
+                message.sender_id,
+                message.sender_nickname,
+                message.timestamp.to_rfc3339(),
+                message.text,
+                message.message_type,
+                message.reply_to_message_id
+            ])
             .map_err(Error::Sql)?;
         Ok(match (exists, changed) {
             (false, 1) => MessageChange::Inserted,
@@ -198,11 +204,14 @@ impl Archive {
 
     fn message_exists(&self, message: &RawMessage) -> Result<bool> {
         self.conn
-            .query_row(
+            .prepare_cached(
                 "SELECT EXISTS(
                     SELECT 1 FROM messages
                     WHERE account_hash = ?1 AND chat_id = ?2 AND message_id = ?3
                  )",
+            )
+            .map_err(Error::Sql)?
+            .query_row(
                 params![message.account_hash, message.chat_id, message.message_id],
                 |row| row.get(0),
             )
