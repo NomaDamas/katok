@@ -3,7 +3,9 @@ use crate::{
     types::{RawMessage, SyncReport},
     Error, Result,
 };
+use chrono::{DateTime, Utc};
 use rusqlite::params;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MessageChange {
@@ -16,13 +18,36 @@ impl Archive {
     pub fn sync_messages(&self, messages: &[RawMessage]) -> Result<SyncReport> {
         let mut inserted = 0usize;
         let mut updated = 0usize;
+
+        // A chat row only depends on (chat_id, chat_name, chat_type), so writing it once per
+        // message meant hundreds of thousands of no-op upserts for a few hundred chats.
+        let mut seen_chats: HashSet<&str> = HashSet::new();
+        // Likewise the cursor: it used to be rewritten per message, which both cost a write per
+        // row and left whichever message happened to be iterated last as the stored value rather
+        // than the newest one.
+        let mut cursors: HashMap<&str, &DateTime<Utc>> = HashMap::new();
+
         for message in messages {
-            self.upsert_chat(message)?;
+            if seen_chats.insert(message.chat_id.as_str()) {
+                self.upsert_chat(message)?;
+            }
             let change = self.upsert_message(message)?;
             inserted += usize::from(change == MessageChange::Inserted);
             updated += usize::from(change == MessageChange::Updated);
-            self.update_cursor(message)?;
+            cursors
+                .entry(message.account_hash.as_str())
+                .and_modify(|newest| {
+                    if message.timestamp > **newest {
+                        *newest = &message.timestamp;
+                    }
+                })
+                .or_insert(&message.timestamp);
         }
+
+        for (source_id, newest) in cursors {
+            self.update_cursor(source_id, newest)?;
+        }
+
         Ok(SyncReport {
             inserted_messages: inserted,
             updated_messages: updated,
@@ -124,12 +149,12 @@ impl Archive {
             .map_err(Error::Sql)
     }
 
-    fn update_cursor(&self, message: &RawMessage) -> Result<()> {
+    fn update_cursor(&self, source_id: &str, newest: &DateTime<Utc>) -> Result<()> {
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO sync_cursors(source_id, cursor_value)
              VALUES (?1, ?2)",
-                params![message.account_hash, message.timestamp.to_rfc3339()],
+                params![source_id, newest.to_rfc3339()],
             )
             .map_err(Error::Sql)?;
         Ok(())

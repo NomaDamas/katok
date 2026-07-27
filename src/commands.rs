@@ -236,15 +236,20 @@ fn run_sync(
     let adapter = adapter_for_source(source, path, data_dir)?;
     let messages = adapter.messages().context("read source messages")?;
     let archive = Archive::open(archive_path).context("open archive")?;
-    let mut report = archive.sync_messages(&messages).context("sync messages")?;
-    report.chunks = rebuild_chunks_with_settings(
-        &archive,
-        ChunkSettings {
-            group_gap_seconds: config.chunk_gap_group_seconds,
-            direct_gap_seconds: config.chunk_gap_direct_seconds,
-        },
-    )
-    .context("rebuild chunks")?;
+    // Message upserts and the chunk rebuild are one unit: chunks derived from half-written
+    // messages are not a usable archive state, so either both land or neither does.
+    let report = archive.in_transaction(|| {
+        let mut report = archive.sync_messages(&messages).context("sync messages")?;
+        report.chunks = rebuild_chunks_with_settings(
+            &archive,
+            ChunkSettings {
+                group_gap_seconds: config.chunk_gap_group_seconds,
+                direct_gap_seconds: config.chunk_gap_direct_seconds,
+            },
+        )
+        .context("rebuild chunks")?;
+        Ok::<_, anyhow::Error>(report)
+    })?;
     freshness::record_sync(data_dir, source, report.total_messages, report.chunks)?;
     print_payload(json, &report)
 }
