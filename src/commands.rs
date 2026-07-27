@@ -261,10 +261,12 @@ fn run_sync(
             group_gap_seconds: config.chunk_gap_group_seconds,
             direct_gap_seconds: config.chunk_gap_direct_seconds,
         };
-        // Recompute only the chats that changed. Two cases still need the full pass: a first
-        // sync has no chunks to scope to, and a gap-settings change invalidates every existing
-        // chunk. Without the second check a settings change would only ever reach rooms that
-        // happened to receive a message, leaving the rest on the old boundaries forever.
+        // Recompute only the chats that changed. Three cases still need the full pass: a first
+        // sync has no chunks to scope to, a gap-settings change invalidates every existing
+        // chunk, and a chunker-version bump does the same — which includes the first run
+        // against an archive written before the version was recorded. Without these checks a
+        // settings or algorithm change would only ever reach rooms that happened to receive a
+        // message, leaving the rest on the old boundaries forever.
         let stored_settings = archive
             .stored_chunk_settings()
             .context("read chunk settings")?;
