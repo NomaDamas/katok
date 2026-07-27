@@ -1,6 +1,6 @@
 ---
 name: katok
-description: Search local KakaoTalk keyword, BM25, and EmbeddingGemma vector indexes through the katok CLI, list rooms, export a room's chunks, and extract image attachments.
+description: Search local KakaoTalk keyword, BM25, and EmbeddingGemma vector indexes through the katok CLI, list rooms, export a room's chunks, and extract image and video attachments.
 ---
 
 # katok
@@ -37,7 +37,7 @@ katok chunk get <chunk-id> --redact --json
 katok chunk context <chunk-id> --json
 katok chunk parent <chunk-id> --json
 katok chunks --chat <chat-id> --json      # every chunk in one room (metadata only)
-katok media get --chat <chat-id> --out <dir> --json   # extracts image attachments
+katok media get --chat <chat-id> --out <dir> --json   # extracts image and video attachments
 katok media get --chat <chat-id> --out <dir> --no-cdn --json   # local tiers only
 ```
 
@@ -77,9 +77,17 @@ The index never follows the KakaoTalk database on its own, so a search only ever
 - `katok chunk get --redact` masks the entire `text`, not only the PII inside it. Use it for a line you must quote, not for a readable export.
 - KakaoTalk system feed entries (invite, join, leave) arrive as JSON strings such as `{"inviter":...}` or `{"member":...,"feedType":N}`. Filter them out of anything a person will read.
 
-## Image Attachments
+## Media Attachments
 
-`katok media get --chat <chat-id> --out <dir>` resolves each image message through four tiers in order: the decrypted local `.img` cache, a GET of the attachment's own presigned CDN URL verified by SHA-1, the decrypted `.thm` thumbnail, and finally a metadata stub. That CDN GET is the only network access anywhere in the CLI, and `--no-cdn` disables it so resolution stays entirely local.
+`katok media get --chat <chat-id> --out <dir>` resolves each media message through four tiers in order: the decrypted local cache, a GET of the attachment's own presigned CDN URL verified by SHA-1, the decrypted `.thm` thumbnail, and finally a metadata stub. That CDN GET is the only network access anywhere in the CLI, and `--no-cdn` disables it so resolution stays entirely local.
+
+Photos (type 2), albums (type 27), and videos (type 3) are all covered. Photos and albums read the `.img` cache; videos read the `.vid` cache, whose filename stem uses a `v` key prefix instead of `p`. The output extension is sniffed from the decoded body, so a video lands as `.mp4`.
+
+Three practical notes for video:
+
+- The local `.vid` cache only holds videos that were actually played on this Mac. Anything else must come from the CDN tier, so `--no-cdn` will miss it.
+- The presigned CDN URL carries an `expires` epoch. Past that, the video is unrecoverable from the archive and only the sender can re-send it.
+- KakaoTalk re-encodes video on send. The retrieved file is the compressed copy the room received, not the sender's original.
 
 ## Related Skills
 

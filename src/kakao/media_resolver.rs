@@ -67,6 +67,8 @@ pub struct MediaFrameInput {
     pub height: Option<i64>,
     pub checksum_sha1: Option<String>,
     pub full_stem: String,
+    /// Cache-file extension for `full_stem`: `.img` for photos, `.vid` for videos.
+    pub full_ext: &'static str,
     pub thumb_stem: String,
     pub output_stem: String,
     pub sender: Option<String>,
@@ -163,6 +165,10 @@ pub fn cdn_fetch(url: &str, timeout: Duration) -> Result<Vec<u8>> {
         .map_err(|err| Error::Kakao(format!("cdn body read failed: {err}")))
 }
 
+/// Sniff an output extension from the decoded body.
+///
+/// Covers both photo and video bodies: a KakaoTalk video arrives as ISO-BMFF
+/// (`....ftyp`) from the CDN, so it must not fall through to `.bin`.
 pub fn image_ext(body: &[u8]) -> &'static str {
     if body.starts_with(b"\xff\xd8\xff") {
         ".jpg"
@@ -172,6 +178,10 @@ pub fn image_ext(body: &[u8]) -> &'static str {
         ".gif"
     } else if body.len() >= 12 && body.starts_with(b"RIFF") && &body[8..12] == b"WEBP" {
         ".webp"
+    } else if body.len() >= 12 && &body[4..8] == b"ftyp" {
+        ".mp4"
+    } else if body.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
+        ".webm"
     } else {
         ".bin"
     }
@@ -190,7 +200,7 @@ where
     let mut errors = Vec::new();
     let mut why = Vec::new();
 
-    let full = media_dirs.find_media_file(chat_id, &frame.full_stem, ".img");
+    let full = media_dirs.find_media_file(chat_id, &frame.full_stem, frame.full_ext);
     if let Some(full_path) = full {
         match read_and_decrypt(&full_path, frame.log_id) {
             Ok(body) => {
@@ -459,6 +469,7 @@ mod tests {
             height: Some(480),
             checksum_sha1: Some(VECTOR_IMAGE_SHA1.to_string()),
             full_stem: photo_full_stem(LOG_ID),
+            full_ext: ".img",
             thumb_stem: photo_thumb_stem(LOG_ID),
             output_stem: LOG_ID.to_string(),
             sender: Some("tester".to_string()),
@@ -625,5 +636,15 @@ mod tests {
         assert_eq!(report.records[0].tier, MediaTier::Stub);
         assert_eq!(report.records[0].tier_reason, "not-cached+cdn-expired");
         options.cdn_enabled = false;
+    }
+
+    #[test]
+    fn sniffs_mp4_and_webm_bodies() {
+        // ISO-BMFF: 4-byte box size, then "ftyp". A video body must not be .bin.
+        let mp4 = b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00";
+        assert_eq!(image_ext(mp4), ".mp4");
+        assert_eq!(image_ext(&[0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0]), ".webm");
+        assert_eq!(image_ext(b"\xff\xd8\xffrest"), ".jpg");
+        assert_eq!(image_ext(b"nonsense-body"), ".bin");
     }
 }
