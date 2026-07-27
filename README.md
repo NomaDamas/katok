@@ -77,7 +77,7 @@ katok doctor --macos-probe --json
 scripts/katok-macos-setup.sh
 ```
 
-자세한 흐름은 `docs/macos-first-run.md`에 있습니다.
+자세한 흐름은 `docs/macos-first-run.md`에 있습니다. 카카오톡 DB 스키마, 미디어 캐시 파일명 규칙, Pkv2 복호화, WAL 읽기 불변식 같은 내부 구조는 `docs/kakao-media-internals.md`에 정리돼 있습니다.
 
 ## 기본 사용 흐름
 
