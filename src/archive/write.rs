@@ -53,6 +53,8 @@ impl Archive {
             updated_messages: updated,
             total_messages: self.count_rows("messages")?,
             chunks: self.count_rows("chunks")?,
+            // Filled in by the caller, which is the only layer that sees every stage.
+            timings_ms: Default::default(),
         })
     }
 

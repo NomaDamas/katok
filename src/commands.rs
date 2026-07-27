@@ -8,8 +8,10 @@ use katok::{
     config::KatokConfig,
     search::{bm25_search_with_snippet, keyword_search_with_snippet},
     semantic::{semantic_search_live_with_config, semantic_search_with_snippet},
+    types::SyncTimings,
 };
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 mod chunk_commands;
 mod freshness;
@@ -234,12 +236,18 @@ fn run_sync(
     data_dir: &Path,
 ) -> Result<()> {
     let adapter = adapter_for_source(source, path, data_dir)?;
+    let read_started = Instant::now();
     let messages = adapter.messages().context("read source messages")?;
+    let read_source = read_started.elapsed().as_millis();
     let archive = Archive::open(archive_path).context("open archive")?;
     // Message upserts and the chunk rebuild are one unit: chunks derived from half-written
     // messages are not a usable archive state, so either both land or neither does.
     let report = archive.in_transaction(|| {
+        let upsert_started = Instant::now();
         let mut report = archive.sync_messages(&messages).context("sync messages")?;
+        let upsert_messages = upsert_started.elapsed().as_millis();
+
+        let rebuild_started = Instant::now();
         report.chunks = rebuild_chunks_with_settings(
             &archive,
             ChunkSettings {
@@ -248,6 +256,12 @@ fn run_sync(
             },
         )
         .context("rebuild chunks")?;
+
+        report.timings_ms = SyncTimings {
+            read_source,
+            upsert_messages,
+            rebuild_chunks: rebuild_started.elapsed().as_millis(),
+        };
         Ok::<_, anyhow::Error>(report)
     })?;
     freshness::record_sync(data_dir, source, report.total_messages, report.chunks)?;
