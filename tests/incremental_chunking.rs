@@ -13,6 +13,7 @@ use katok::{
         CHUNKER_VERSION,
     },
     fixture::read_fixture,
+    search::bm25_search,
     types::{RawMessage, TouchedChat},
 };
 use rusqlite::{params, Connection};
@@ -123,6 +124,24 @@ fn assert_archive_invariants(conn: &Connection, expected_messages: i64) {
         .query_row("SELECT COUNT(*) FROM chunks_fts", [], |row| row.get(0))
         .expect("count chunks_fts");
     assert_eq!(chunks, fts, "chunks and chunks_fts must stay in lockstep");
+
+    // The tail delete seeks fts rows by rowid, so `chunks_fts.rowid` must be the same rowid the
+    // chunk carries in `chunks` (the invariant documented on the table in `schema.rs`, and the
+    // one `search.rs` already joins on). A count match alone would pass an archive where the two
+    // drifted apart, which would leave the delete removing the wrong rows.
+    let misaligned_fts: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM chunks_fts f
+             LEFT JOIN chunks c ON c.rowid = f.rowid AND c.chunk_id = f.chunk_id
+             WHERE c.chunk_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("fts rowid alignment");
+    assert_eq!(
+        misaligned_fts, 0,
+        "every chunks_fts row must sit on its chunk's rowid"
+    );
 
     let orphan_cm: i64 = conn
         .query_row(
@@ -1131,10 +1150,135 @@ fn scoped_chunk_statements() -> Vec<&'static str> {
 
 /// Tables whose whole-table scan is what the chunk indexes exist to remove.
 ///
-/// `chunks_fts` is deliberately absent: it is an fts5 virtual table whose `chunk_id` column is
-/// UNINDEXED, so deleting by `chunk_id` scans it no matter what indexes the other tables carry.
-/// Removing that scan means changing the FTS content model, not adding an index.
+/// `chunks_fts` is deliberately absent, but no longer because nothing can be done about it:
+/// SQLite prints every fts5 step as `SCAN ... VIRTUAL TABLE INDEX`, even a single-row seek, so a
+/// name check cannot tell the two apart. What the fts delete costs is asserted instead by
+/// [`a_scoped_rebuild_seeks_fts_rows_by_rowid_instead_of_walking_the_whole_table`], which reads
+/// the pushed-down constraint out of the plan.
 const MUST_NOT_SCAN: &[&str] = &["chunks", "parent_chunks", "chunk_parent_refs"];
+
+/// The `idxStr` fts5 reported for the `chunks_fts` step of `plan`, if the plan has one.
+///
+/// SQLite renders an fts5 step as `SCAN chunks_fts VIRTUAL TABLE INDEX <n>:<idxStr>`, and
+/// `idxStr` is what fts5's `xBestIndex` built out of the constraints it accepted: `=` for a
+/// rowid equality, `<` / `>` for a rowid range, `M<n>` for a MATCH. An **empty** `idxStr` means
+/// fts5 accepted nothing and will hand every row of the table back for SQLite to filter — which
+/// is the archive-size cost, spelled out in the plan rather than inferred from a stopwatch.
+fn fts_index_str(plan: &str) -> Option<String> {
+    const MARKER: &str = "chunks_fts VIRTUAL TABLE INDEX ";
+    plan.split('|')
+        .map(str::trim)
+        .find(|step| step.contains(MARKER))
+        .and_then(|step| step.split(MARKER).nth(1))
+        .and_then(|rest| rest.split_once(':'))
+        .map(|(_, idx_str)| idx_str.trim().to_string())
+}
+
+#[test]
+fn a_scoped_rebuild_seeks_fts_rows_by_rowid_instead_of_walking_the_whole_table() {
+    // `chunk_id` is an UNINDEXED fts5 column, so addressing the tail's fts rows by it pushes no
+    // constraint into the virtual table and SQLite filters the entire archive itself — the single
+    // largest term left in a scoped rebuild. `rowid` is the docid, which fts5 does accept, so the
+    // delete becomes one seek per removed row and costs nothing per untouched row.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = Archive::open(&dir.path().join("archive.sqlite3")).expect("open archive");
+    archive.sync_messages(&fixture_messages()).expect("sync");
+    rebuild_chunks(&archive).expect("rebuild");
+    let conn = archive.connection();
+
+    let fts_delete = DELETE_CHAT_CHUNKS_STATEMENTS
+        .iter()
+        .find(|sql| sql.contains("DELETE FROM chunks_fts"))
+        .expect("the tail delete must still remove fts rows");
+    let plan = query_plan(conn, fts_delete);
+    let idx_str = fts_index_str(&plan).expect("the plan must have a chunks_fts step");
+    assert!(
+        idx_str.contains('='),
+        "the fts tail delete pushes no rowid constraint into fts5, so it walks the whole archive\
+         \nstatement: {fts_delete}\nplan: {plan}"
+    );
+
+    // The same delete written against `chunk_id` — what this replaced. Pinning that it reports an
+    // empty idxStr is what gives the assertion above teeth: it shows the check distinguishes the
+    // two forms rather than passing on anything fts5 happens to print.
+    let by_chunk_id = "DELETE FROM chunks_fts
+         WHERE chunk_id IN (SELECT chunk_id FROM chunks
+            WHERE chat_id = ?1 AND started_at >= COALESCE(?2, ''))";
+    let old_plan = query_plan(conn, by_chunk_id);
+    assert_eq!(
+        fts_index_str(&old_plan).as_deref(),
+        Some(""),
+        "addressing fts rows by the UNINDEXED chunk_id column should push nothing down\nplan: {old_plan}"
+    );
+}
+
+#[test]
+fn bm25_search_after_a_scoped_tail_rebuild_returns_what_a_full_rebuild_would() {
+    // The rowid delete is only correct because `chunks_fts.rowid` is the chunk's `chunks.rowid`,
+    // and that is the same correspondence `bm25_search` joins on. Running the real search over an
+    // archive whose tail was replaced in place exercises both halves: a delete that removed the
+    // wrong rows would surface here as a stale hit, a missing hit, or a wrong chunk_id.
+    let base = chrono::DateTime::parse_from_rfc3339("2026-03-01T00:00:00Z")
+        .expect("base timestamp")
+        .with_timezone(&chrono::Utc);
+    // One sender, no gaps: every wave merges into the chat's last chunk, so the scoped rebuild
+    // must delete the previous chunk's fts row and write a new one for the merged chunk.
+    let mut messages = Vec::new();
+    for (idx, word) in ["alfa", "bravo", "charlie", "delta"].iter().enumerate() {
+        messages.push(raw(
+            "S",
+            &format!("s-{idx}"),
+            "보글이",
+            base + chrono::Duration::seconds(idx as i64 * 30),
+            word,
+            None,
+        ));
+    }
+    // A second room so the search has something the tail rebuild never touches.
+    messages.push(raw("T", "t-0", "부리", base, "echo", None));
+
+    let full_dir = tempfile::tempdir().expect("tempdir");
+    let full = Archive::open(&full_dir.path().join("archive.sqlite3")).expect("open archive");
+    full.sync_messages(&messages).expect("sync");
+    rebuild_chunks(&full).expect("full rebuild");
+
+    let staged_dir = tempfile::tempdir().expect("tempdir");
+    let staged = Archive::open(&staged_dir.path().join("archive.sqlite3")).expect("open archive");
+    for wave in [&messages[..2], &messages[2..]] {
+        let report = staged.sync_messages(wave).expect("sync wave");
+        rebuild_chunks_for_chats(&staged, settings(), &report.touched_chats)
+            .expect("scoped rebuild");
+    }
+
+    for term in ["alfa", "delta", "echo"] {
+        let expected: Vec<String> = bm25_search(&full, term, 10)
+            .expect("full search")
+            .into_iter()
+            .map(|hit| hit.chunk_id)
+            .collect();
+        assert_eq!(
+            expected.len(),
+            1,
+            "the fixture should give exactly one hit for {term}"
+        );
+        let actual: Vec<String> = bm25_search(&staged, term, 10)
+            .expect("staged search")
+            .into_iter()
+            .map(|hit| hit.chunk_id)
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "bm25 search for {term} diverged after a scoped tail rebuild"
+        );
+    }
+
+    assert_eq!(
+        snapshot(full.connection()),
+        snapshot(staged.connection()),
+        "scoped tail rebuild diverged from a full rebuild"
+    );
+    assert_archive_invariants(staged.connection(), messages.len() as i64);
+}
 
 /// The tables a plan reports a whole-table `SCAN` of.
 ///

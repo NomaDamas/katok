@@ -136,6 +136,65 @@ Because every edge is owned by exactly one `chat_id`, the archive-wide pass equa
 
 The condition is falsifiable and directly testable. It breaks only if a future change (a) mints `message_id` or `reply_to_message_id` without the `chat_id` prefix, or (b) makes the ref join match across the prefix (for example, stripping the prefix and joining on bare `log_id`). Step 3 pins it by extending the existing seven-table full-vs-scoped equivalence (see below) to assert, on a fixture with **non-empty** `reply_edges` and `chunk_parent_refs`, that a per-chat ref rebuild is row-for-row identical to the archive-wide one, and that every produced edge's two endpoints share a `chat_id` prefix. A test that flips either invariant — a cross-chat reply reference, or a join that ignores the prefix — must make that equivalence fail.
 
+## The FTS tail delete is a rowid seek, not a table walk (step-4 determination)
+
+With the `chunks` indexes in place, the largest single term left in a scoped rebuild was one statement: the tail delete against `chunks_fts`. It read
+
+```sql
+DELETE FROM chunks_fts
+ WHERE chunk_id IN (SELECT chunk_id FROM chunks
+    WHERE chat_id = ?1 AND started_at >= COALESCE(?2, ''))
+```
+
+and cost ~41ms warm on the real archive while removing four rows.
+
+### Why no index could fix it
+
+`chunks_fts` is `fts5(chunk_id UNINDEXED, text)`. `UNINDEXED` means fts5 keeps the column as stored content only and offers SQLite no way to constrain on it, and a virtual table cannot carry an ordinary index. SQLite's only remaining plan is to ask fts5 for every row of the table and apply the `IN` itself, so the statement's cost follows **archive size**. The plan says so directly:
+
+```
+SCAN chunks_fts VIRTUAL TABLE INDEX 0:
+```
+
+The `idxStr` after the colon is what fts5's `xBestIndex` accepted. Empty means it accepted nothing.
+
+### What replaced it
+
+The fix is not a different content model but a different handle. `chunks_fts.rowid` **is** the chunk's `chunks.rowid`: `insert_chunk` writes the fts row as `INSERT INTO chunks_fts(rowid, chunk_id, text) VALUES ((SELECT rowid FROM chunks WHERE chunk_id = ?1), ?1, ?2)` (`src/archive/write.rs`), and `bm25_search` already joins the two tables on it (`src/search.rs`, `JOIN chunks c ON c.rowid = chunks_fts.rowid`). The correspondence is therefore load-bearing in the read path already; the delete just starts using it:
+
+```sql
+DELETE FROM chunks_fts
+ WHERE rowid IN (SELECT rowid FROM chunks
+    WHERE chat_id = ?1 AND started_at >= COALESCE(?2, ''))
+```
+
+`rowid` is fts5's docid, the one column it does accept a constraint on. The plan picks up the pushed-down constraint, and the subquery becomes covering:
+
+```
+SCAN chunks_fts VIRTUAL TABLE INDEX 0:=
+LIST SUBQUERY 1
+  SEARCH chunks USING COVERING INDEX idx_chunks_chat_started (chat_id=? AND started_at>?)
+```
+
+SQLite still prints `SCAN` for any fts5 step — it does for a single-row seek too — so the scan-by-name check the other tables use says nothing here. The `=` in the `idxStr` is the evidence, and it is what the test asserts.
+
+### Measured, at two archive sizes
+
+Real-archive copy (405k messages / 262k chunks), largest room, floor set so exactly four chunks are deleted, warm, `BEGIN`/`ROLLBACK` per run:
+
+| archive `chunks_fts` rows | `chunk_id` form | `rowid` form |
+|---|---|---|
+| 262,271 | 43 / 40 / 41 ms | 0 / 1 / 0 ms |
+| 193,857 (other rooms halved) | 28 / 27 / 26 ms | 0 / 1 / 0 ms |
+
+The old form tracks archive size (74% of the rows, 66% of the time); the new one does not move. Decomposed on the same copy, the surviving cost of the new statement is the delete itself (~1ms for four rows) — the archive-proportional term is gone, not merely reduced.
+
+### The invariant this now rests on
+
+> Every `chunks_fts` row sits on the `rowid` its chunk has in `chunks`.
+
+Written by `insert_chunk`, read by `bm25_search`, and now also the address the tail delete deletes by. It is stated on the table in `src/archive/schema.rs` and pinned by `assert_archive_invariants`, which fails if any fts row's `(rowid, chunk_id)` does not match a `chunks` row — a count-only check would pass an archive where the two had drifted and the delete was removing the wrong rows.
+
 ## The tests that pin the rule
 
 `tests/incremental_chunking.rs` pins both the cut rule and the equivalence surface:
@@ -159,6 +218,15 @@ The condition is falsifiable and directly testable. It breaks only if a future c
   100k-message single room (override with `KATOK_LARGE_CHAT_N`); tail equals a full
   rebuild of the same tail messages; frozen prefix untouched; scoped cost does not
   track room size.
+- `a_scoped_rebuild_seeks_fts_rows_by_rowid_instead_of_walking_the_whole_table` —
+  the fts tail delete pushes a rowid constraint into fts5 (`idxStr` carries `=`),
+  and the `chunk_id` form it replaced is pinned as pushing nothing down, so the
+  assertion is shown to distinguish the two rather than to accept anything fts5
+  prints.
+- `bm25_search_after_a_scoped_tail_rebuild_returns_what_a_full_rebuild_would` —
+  the real search API over an archive whose tail was replaced in place; a delete
+  that removed the wrong fts rows shows up as a stale hit, a missing hit, or a
+  wrong `chunk_id`.
 
 If a future edit makes a boundary non-local, or makes a closed window depend on
 later chunks, those equivalences break and the tests fail.

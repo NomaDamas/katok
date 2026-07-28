@@ -82,6 +82,12 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             unresolved_reason TEXT,
             PRIMARY KEY(child_message_id, parent_message_id)
         );
+        -- Invariant: `chunks_fts.rowid` is the `chunks.rowid` of the same chunk. `insert_chunk`
+        -- writes it that way, `search.rs` joins the two tables on it, and the tail delete seeks
+        -- fts rows by it. It is load-bearing rather than incidental because `chunk_id` is an
+        -- UNINDEXED fts5 column: addressing a row by `chunk_id` makes SQLite walk every row of
+        -- the table, so `rowid` is the only handle that keeps a scoped delete off archive-size
+        -- cost. `tests/incremental_chunking.rs` pins the alignment after every rebuild path.
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
             USING fts5(chunk_id UNINDEXED, text);
 

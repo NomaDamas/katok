@@ -19,9 +19,18 @@ use std::collections::{HashMap, HashSet};
 /// `idx_chunks_chat_started`. The `OR` form makes the whole term unusable as a bound, which left
 /// each delete walking every chunk of the room even once the index existed, putting room size
 /// back into a cost the tail scope is meant to bound.
+///
+/// The `chunks_fts` delete addresses rows by `rowid`, not by `chunk_id`. `chunk_id` is an
+/// UNINDEXED fts5 column, so no index can serve it and SQLite has to ask fts5 for every row of
+/// the archive and filter them itself — a cost that follows archive size and was the largest
+/// single term left in a scoped rebuild. `rowid` is the one column fts5 can seek on: it is the
+/// docid, and a rowid constraint is pushed into the virtual table (the plan's idxStr picks up
+/// `=`), so the delete costs a b-tree lookup per deleted row and nothing per untouched row.
+/// The rowid is the same rowid the chunk carries in `chunks` — see the `chunks_fts` invariant in
+/// `schema.rs`, which `insert_chunk` writes and `search.rs` already reads back through.
 pub const DELETE_CHAT_CHUNKS_STATEMENTS: [&str; 6] = [
     "DELETE FROM chunks_fts
-     WHERE chunk_id IN (SELECT chunk_id FROM chunks
+     WHERE rowid IN (SELECT rowid FROM chunks
         WHERE chat_id = ?1 AND started_at >= COALESCE(?2, ''))",
     "DELETE FROM chunk_messages
      WHERE chunk_id IN (SELECT chunk_id FROM chunks
