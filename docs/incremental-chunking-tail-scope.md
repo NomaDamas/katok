@@ -42,7 +42,7 @@ A mid-history in-place update (for example a `sender_nickname` change on an old 
 
 The rule needs `e` per touched chat, which `sync_messages` does not report yet: it currently reports only `touched_chats` (chat ids), not where in each chat the change landed. The implementation step will extend the sync report to also carry, per touched chat, the smallest changed key `e` (its earliest inserted-or-updated message's `(timestamp, message_id)`), and `rebuild_chunks_for_chats` will resolve `P` from the stored chunk gaps of that chat. The existing full-rebuild triggers (first sync, gap-settings change, chunker-version bump) are unaffected and still take the full path.
 
-`rebuild_parent_refs` (the reply-edge and cross-chunk reference pass in `replace_chunks_for_chats`) still scans the whole archive. Step-1 measurements put that within the small-room floor (about 220ms) while the chunking loop dominated the large-room cost (about 4.95s), so tail-scoping the chunking loop captures the win; scoping the reference pass is a separate, later concern and is out of scope here.
+`rebuild_parent_refs` (the reply-edge and cross-chunk reference pass) still scans the whole archive. Step-1 measurements put that within the small-room floor (about 220ms) while the chunking loop dominated the large-room cost (about 4.95s), so tail-scoping the chunking loop captures the win; scoping the reference pass is a separate, later concern and is out of scope here.
 
 ### Where the implementation actually cuts
 
@@ -55,6 +55,67 @@ equal) choice of `P`. Char-split windows after the cut are recomputed rather tha
 reused — same result, and the recompute range stays bounded by the burst since
 the last gap, not by room size.
 
-## The test that pins the rule
+`TouchedChat.earliest_changed_message_id` is filled by `sync_messages` so the report
+states the full change key `(timestamp, message_id)`, but the cut resolver does
+not read it: a gap-derived `P` is separated from its predecessor by more than
+300s, so `started_at >= P` needs no message-id tiebreak.
 
-`tests/incremental_chunking.rs` builds a synthetic chat that forms two parent windows and asserts that an archive rebuilt from only the last window's first message onward reproduces, byte-for-byte, the tail of a full rebuild of the whole chat -- across `chunks`, `parent_chunks`, `chunk_messages`, `parent_chunk_children`, `chunk_parent_refs`, and `chunks_fts` (the fixture carries no replies, so `chunk_parent_refs` is covered by the query but empty on both sides; the reference pass is archive-wide and out of scope here). If a future edit makes a boundary non-local, or makes a closed window depend on later chunks, that equivalence breaks and the test fails.
+## Residual cost after tail scope (step-4 measurement)
+
+Tail-scoping drops the large-room `rebuild_chunks` contribution from ~5s to
+~270ms on the real archive (178k-message room, one new message). The residual is
+**not** the re-chunk loop. It breaks down as:
+
+1. **Archive-wide reply / parent-ref pass** (`rebuild_reply_and_parent_refs` →
+   `rebuild_parent_refs`). Every scoped rebuild deletes and rewrites `reply_edges`
+   for the whole archive and re-INSERT-OR-IGNOREs `chunk_parent_refs` by joining
+   `messages` × `chunk_messages` with no chat filter. Cost tracks **archive size**,
+   not the touched tail.
+2. **No indexes on `chunks`** (`src/archive/schema.rs` creates tables only).
+   `tail_rebuild_start` (`WHERE chat_id = ? AND started_at < ? ORDER BY started_at
+   DESC`), tail deletes (`WHERE chat_id = ? AND started_at >= ?`), and the ref
+   joins scan and sort the full `chunks` / `chunk_messages` tables. On a ~262k-row
+   archive that is a full scan per statement.
+
+Fixing either is a separate plan (indexes and/or scoped ref rebuild). This plan
+only records the split so the residual floor is not mistaken for failed tail scope.
+
+Synthetic check (release, `tests/incremental_chunking.rs::a_large_single_room_...`,
+n=100000, 2026-07-28):
+
+| stage | ms |
+|---|---|
+| whole-chat seed rebuild | 131644 |
+| one-message scoped append | 5231 |
+| `rebuild_reply_and_parent_refs` alone | 5102 |
+
+Speedup scoped vs whole-chat ≈ 25x. Of the 5.2s scoped floor, **5.1s is the
+archive-wide ref pass** — the re-chunk of the last burst is negligible. That is
+why residual scales with archive size even after tail scope.
+
+## The tests that pin the rule
+
+`tests/incremental_chunking.rs` pins both the cut rule and the equivalence surface:
+
+- `cutting_at_the_last_parent_window_reproduces_the_full_rebuild_tail` — two parent
+  windows; rebuild from the last window's first message matches the full rebuild's
+  tail across `chunks`, `parent_chunks`, `chunk_messages`, `parent_chunk_children`,
+  `chunk_parent_refs`, `reply_edges`, and `chunks_fts`.
+- `an_incremental_wave_after_a_gap_rebuilds_only_the_tail_and_matches_a_full_rebuild`
+  — the scoped path engages an interior cut and still matches a full rebuild.
+- `a_char_limit_split_window_is_recomputed_and_matches_a_full_rebuild` — char-limit
+  (3,000) window splits after a gap cut are recomputed, not frozen mid-window.
+- `an_in_place_nickname_change_widens_the_cut_and_matches_a_full_rebuild` —
+  mid-history nickname update (not `text`; `upsert_message` ignores text on
+  conflict) widens `P` correctly.
+- `a_backfill_between_bursts_with_a_cross_chunk_reply_matches_a_full_rebuild` —
+  late insert + non-empty `chunk_parent_refs`.
+- `messages_sharing_a_timestamp_at_a_boundary_lose_neither_coverage_nor_equivalence`
+  — same-timestamp boundary, no coverage loss, no message-id tiebreak needed.
+- `a_large_single_room_tail_matches_a_full_rebuild_and_cost_tracks_new_messages` —
+  100k-message single room (override with `KATOK_LARGE_CHAT_N`); tail equals a full
+  rebuild of the same tail messages; frozen prefix untouched; scoped cost does not
+  track room size.
+
+If a future edit makes a boundary non-local, or makes a closed window depend on
+later chunks, those equivalences break and the tests fail.
