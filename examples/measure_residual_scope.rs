@@ -302,7 +302,7 @@ fn measure_point(
         // Full rebuild_chunks_for_chats (current production path: tail + scoped refs).
         let t = Instant::now();
         let total_chunks = archive.in_transaction(|| {
-            rebuild_chunks_for_chats(&archive, settings, &[touched.clone()])
+            rebuild_chunks_for_chats(&archive, settings, std::slice::from_ref(&touched))
         })?;
         let total_ms = t.elapsed().as_millis();
 
