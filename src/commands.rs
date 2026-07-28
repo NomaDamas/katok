@@ -39,9 +39,22 @@ pub(crate) fn run(
             archive_path,
             semantic_dir,
         ),
-        Commands::Sync { source, path, json } => {
+        Commands::Sync {
+            source,
+            path,
+            json,
+            touched,
+        } => {
             let source = source.unwrap_or_else(|| config.source_adapter.clone());
-            run_sync(&source, path, json, &config, &archive_path, &data_dir)
+            run_sync(
+                &source,
+                path,
+                json,
+                touched,
+                &config,
+                &archive_path,
+                &data_dir,
+            )
         }
         Commands::Index {
             full,
@@ -240,6 +253,7 @@ fn run_sync(
     source: &str,
     path: Option<PathBuf>,
     json: bool,
+    include_touched: bool,
     config: &KatokConfig,
     archive_path: &Path,
     data_dir: &Path,
@@ -251,7 +265,7 @@ fn run_sync(
     let archive = Archive::open(archive_path).context("open archive")?;
     // Message upserts and the chunk rebuild are one unit: chunks derived from half-written
     // messages are not a usable archive state, so either both land or neither does.
-    let report = archive.in_transaction(|| {
+    let mut report = archive.in_transaction(|| {
         let upsert_started = Instant::now();
         let mut report = archive.sync_messages(&messages).context("sync messages")?;
         let upsert_messages = upsert_started.elapsed().as_millis();
@@ -297,6 +311,8 @@ fn run_sync(
         };
         Ok::<_, anyhow::Error>(report)
     })?;
+    // Gate is output-only: the archive always computed touched_chats for the rebuild above.
+    report.include_touched = include_touched;
     freshness::record_sync(data_dir, source, report.total_messages, report.chunks)?;
     print_payload(json, &report)
 }

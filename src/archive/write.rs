@@ -199,6 +199,8 @@ impl Archive {
             // Filled in by the caller, which is the only layer that sees every stage.
             timings_ms: Default::default(),
             touched_chats,
+            // CLI sets this when `sync --touched` is requested; keep default off for byte-compat.
+            include_touched: false,
         })
     }
 

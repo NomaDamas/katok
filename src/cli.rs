@@ -26,6 +26,12 @@ pub(crate) enum Commands {
         path: Option<PathBuf>,
         #[arg(long)]
         json: bool,
+        /// Include per-chat earliest-change keys (`touched_chats`) in the report.
+        ///
+        /// Opt-in: without this flag the JSON shape matches historical consumers exactly.
+        /// Each entry is `{chat_id, earliest_changed_timestamp, earliest_changed_message_id}`.
+        #[arg(long)]
+        touched: bool,
     },
     Index {
         #[arg(long)]
