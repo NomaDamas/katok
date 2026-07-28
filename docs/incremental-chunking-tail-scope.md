@@ -40,9 +40,20 @@ A mid-history in-place update (for example a `sender_nickname` change on an old 
 
 ## What the implementation step must add to sync
 
-The rule needs `e` per touched chat, which `sync_messages` does not report yet: it currently reports only `touched_chats` (chat ids), not where in each chat the change landed. The implementation step will extend the sync report to also carry, per touched chat, the smallest changed key `e` (its earliest inserted-or-updated message's `(timestamp, message_id)`), and `rebuild_chunks_for_chats` will resolve `P` from the stored parent windows of that chat. The existing full-rebuild triggers (first sync, gap-settings change, chunker-version bump) are unaffected and still take the full path.
+The rule needs `e` per touched chat, which `sync_messages` does not report yet: it currently reports only `touched_chats` (chat ids), not where in each chat the change landed. The implementation step will extend the sync report to also carry, per touched chat, the smallest changed key `e` (its earliest inserted-or-updated message's `(timestamp, message_id)`), and `rebuild_chunks_for_chats` will resolve `P` from the stored chunk gaps of that chat. The existing full-rebuild triggers (first sync, gap-settings change, chunker-version bump) are unaffected and still take the full path.
 
 `rebuild_parent_refs` (the reply-edge and cross-chunk reference pass in `replace_chunks_for_chats`) still scans the whole archive. Step-1 measurements put that within the small-room floor (about 220ms) while the chunking loop dominated the large-room cost (about 4.95s), so tail-scoping the chunking loop captures the win; scoping the reference pass is a separate, later concern and is out of scope here.
+
+### Where the implementation actually cuts
+
+The implementation cuts not at the last parent window before `e` but at the last
+**gap-derived** window start before `e`: the most recent chunk whose distance to
+its predecessor exceeds `DEFAULT_PARENT_WINDOW_SECONDS`. A gap that wide always
+opens a parent window, so every gap-derived start is a true window start and the
+proof above applies unchanged; the cut is merely a more conservative (earlier or
+equal) choice of `P`. Char-split windows after the cut are recomputed rather than
+reused — same result, and the recompute range stays bounded by the burst since
+the last gap, not by room size.
 
 ## The test that pins the rule
 

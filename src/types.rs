@@ -44,7 +44,9 @@ pub struct TouchedChat {
     pub chat_id: String,
     /// RFC3339 timestamp of the earliest inserted-or-updated message in this chat.
     pub earliest_changed_timestamp: String,
-    /// Message id of that same earliest-changed message, breaking ties within one timestamp.
+    /// Message id of that same earliest-changed message. Currently unread: the
+    /// gap-derived cut guarantees a >=300s separation at `P`, so `started_at >= P`
+    /// needs no tiebreak. Kept so the report states the full change key.
     pub earliest_changed_message_id: String,
 }
 
