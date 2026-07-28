@@ -106,13 +106,21 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_chunk_parent_refs_parent
             ON chunk_parent_refs(parent_chunk_id);
 
-        -- The scoped reply/parent-ref pass filters `messages` by `chat_id` and joins
-        -- `chunk_messages` by `message_id`. Neither column is a primary-key prefix
-        -- (`messages` is `(account_hash, chat_id, message_id)`, `chunk_messages` is
-        -- `(chunk_id, message_id)`), so without these every touched-chat ref rebuild
-        -- would scan the whole archive — the cost the scope exists to remove.
-        CREATE INDEX IF NOT EXISTS idx_messages_chat_id
-            ON messages(chat_id);
+        -- Two touched-chat reads address `messages` by `chat_id`, which is not a primary-key
+        -- prefix (`messages` is `(account_hash, chat_id, message_id)`), so without an index each
+        -- scans the whole archive — the cost the scope exists to remove:
+        --   * the scoped reply/parent-ref pass's membership subquery `WHERE chat_id = ?1`, and
+        --   * `raw_messages_for_chat_since`, which also floors on `timestamp` and orders by
+        --     `(timestamp, message_id)`.
+        -- One index covers both: `(chat_id, timestamp, message_id)` serves the membership
+        -- subquery through its `chat_id` prefix (covering, since `message_id` is the only column
+        -- it selects) and gives the tail read a single `SEARCH (chat_id=? AND timestamp>?)` that
+        -- also satisfies the `ORDER BY`, so neither read sorts or scans. A bare `(chat_id)` index
+        -- would serve the membership half but leave the tail read sorting and re-filtering the
+        -- floor, and keeping both would only add a redundant index for sync to maintain on every
+        -- insert — so the wider index is the single source of truth for reaching a chat's rows.
+        CREATE INDEX IF NOT EXISTS idx_messages_chat_timestamp
+            ON messages(chat_id, timestamp, message_id);
         CREATE INDEX IF NOT EXISTS idx_chunk_messages_message
             ON chunk_messages(message_id);",
     )

@@ -15,6 +15,25 @@ pub const TAIL_REBUILD_START_QUERY: &str = "SELECT started_at, ended_at FROM chu
      WHERE chat_id = ?1 AND started_at < ?2
      ORDER BY started_at DESC";
 
+/// One chat's messages in send order, that [`Archive::raw_messages_for_chat_since`] runs.
+///
+/// Bound as `(?1 = chat_id, ?2 = an RFC3339 floor or NULL for the whole chat)`. Lives here rather
+/// than inline so the query-plan test asserts against the text that actually runs.
+///
+/// The floor is written as `timestamp >= COALESCE(?2, '')` rather than `?2 IS NULL OR
+/// timestamp >= ?2`: the two select the same rows — every stored `timestamp` is text, so a NULL
+/// floor collapsed to `''` still admits all of them — but only the `COALESCE` form is sargable, so
+/// SQLite can carry the floor into the index instead of filtering it row by row. With
+/// `idx_messages_chat_timestamp(chat_id, timestamp, message_id)` the plan is a single
+/// `SEARCH ... (chat_id=? AND timestamp>?)` that also serves the `ORDER BY`, so a scoped tail read
+/// touches only the tail and never sorts or scans the whole archive.
+pub const RAW_MESSAGES_FOR_CHAT_SINCE_QUERY: &str =
+    "SELECT account_hash, chat_id, chat_name, chat_type, message_id,
+            sender_nickname, timestamp, text, message_type
+     FROM messages
+     WHERE chat_id = ?1 AND timestamp >= COALESCE(?2, '')
+     ORDER BY timestamp, message_id";
+
 impl Archive {
     pub fn chunks_for_chat(&self, chat_id: &str) -> Result<Vec<ChunkSummary>> {
         let mut stmt = self
@@ -168,13 +187,7 @@ impl Archive {
     ) -> Result<Vec<StoredMessage>> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT account_hash, chat_id, chat_name, chat_type, message_id,
-                    sender_nickname, timestamp, text, message_type
-             FROM messages
-             WHERE chat_id = ?1 AND (?2 IS NULL OR timestamp >= ?2)
-             ORDER BY timestamp, message_id",
-            )
+            .prepare(RAW_MESSAGES_FOR_CHAT_SINCE_QUERY)
             .map_err(Error::Sql)?;
         let rows = stmt
             .query_map(params![chat_id, since], StoredMessage::from_row)

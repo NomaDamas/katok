@@ -195,6 +195,36 @@ The old form tracks archive size (74% of the rows, 66% of the time); the new one
 
 Written by `insert_chunk`, read by `bm25_search`, and now also the address the tail delete deletes by. It is stated on the table in `src/archive/schema.rs` and pinned by `assert_archive_invariants`, which fails if any fts row's `(rowid, chunk_id)` does not match a `chunks` row — a count-only check would pass an archive where the two had drifted and the delete was removing the wrong rows.
 
+## The tail read of `messages` is a chat seek, not a table walk (step-5 determination)
+
+The scoped rebuild reads the tail it recomputes through `raw_messages_for_chat_since`. Its filter reaches `messages` by `chat_id`, which is not a primary-key prefix (`messages` is `(account_hash, chat_id, message_id)`), so with no messages index the read scans the whole archive — the same defect class as the chunk tables, one table over. It read
+
+```sql
+SELECT ... FROM messages
+ WHERE chat_id = ?1 AND (?2 IS NULL OR timestamp >= ?2)
+ ORDER BY timestamp, message_id
+```
+
+Two things were wrong, and an index alone fixes only one. A bare `(chat_id)` index (which the step-3 ref pass had already added) turns the `SCAN` into a `SEARCH`, but leaves a `USE TEMP B-TREE FOR ORDER BY` and re-checks the `timestamp` floor row by row, because `?2 IS NULL OR timestamp >= ?2` is not sargable — SQLite cannot carry an `OR` over a bind into an index range.
+
+### What replaced it
+
+The floor is rewritten to `timestamp >= COALESCE(?2, '')`, exactly as the chunk statements were. The two forms select the same rows — every stored `timestamp` is text, so a NULL floor collapsed to `''` still admits all of them — but only the `COALESCE` form is sargable. Paired with a single index on `(chat_id, timestamp, message_id)`, the read becomes
+
+```
+SEARCH messages USING INDEX idx_messages_chat_timestamp (chat_id=? AND timestamp>?)
+```
+
+with no scan, no temp b-tree (the index order is the `ORDER BY`), and the floor pushed into the range.
+
+### One index, not two
+
+`idx_messages_chat_timestamp(chat_id, timestamp, message_id)` replaces the step-3 `idx_messages_chat_id(chat_id)` rather than sitting beside it. Its `chat_id` prefix serves the ref pass's membership subquery `SELECT message_id FROM messages WHERE chat_id = ?1` (covering, since `message_id` is the only column selected), so the narrow index carries no query the wide one does not. Keeping both would only add an index for sync to maintain on every message insert — a write cost this plan exists to shrink — so the wider index is the single handle for reaching a chat's rows. It is `idx_messages_chat_timestamp` that the reopen test now lists, and the step-3 ref-scan test still passes on its prefix.
+
+### The evidence this rests on
+
+Since the step-3 index had already removed the raw `SCAN`, a scan-by-name check alone would pass without the wider index. The regression instead pins the whole win — no `SCAN messages`, no temp b-tree, and the `timestamp` bound present in the search's constraint list — and gives the bound check teeth by pinning that the `OR` form it replaced pushes only `chat_id`. It then drops `idx_messages_chat_timestamp` and asserts the read falls back to a `SCAN`, so the index is shown to be load-bearing for this exact query independently of the ref pass that first introduced a messages index.
+
 ## The tests that pin the rule
 
 `tests/incremental_chunking.rs` pins both the cut rule and the equivalence surface:
@@ -227,6 +257,14 @@ Written by `insert_chunk`, read by `bm25_search`, and now also the address the t
   the real search API over an archive whose tail was replaced in place; a delete
   that removed the wrong fts rows shows up as a stale hit, a missing hit, or a
   wrong `chunk_id`.
+- `raw_messages_for_chat_since_seeks_one_chat_tail_without_scanning_messages` —
+  the tail read's plan has no `SCAN messages`, no temp b-tree, and the `timestamp`
+  floor pushed into the index; the `OR` form it replaced is pinned as pushing only
+  `chat_id`, and dropping `idx_messages_chat_timestamp` is pinned as forcing a
+  `SCAN`, so the index is shown load-bearing for this read.
+- `the_sargable_floor_selects_the_same_rows_as_the_or_form` — the `COALESCE(?2, '')`
+  floor returns exactly the rows `?2 IS NULL OR timestamp >= ?2` did, on real data,
+  for a NULL floor, a mid-chat floor, and one past the end.
 
 If a future edit makes a boundary non-local, or makes a closed window depend on
 later chunks, those equivalences break and the tests fail.

@@ -58,8 +58,8 @@ pub const DELETE_CHAT_CHUNKS_STATEMENTS: [&str; 6] = [
 /// Membership is by `messages.chat_id`, not by a `child_message_id` string prefix: the mint
 /// invariant `message_id = {chat_id}-{log_id}` holds in production, but fixtures and any
 /// pre-mint row are free-form, and the two are equivalent only when the mint holds. The
-/// `chat_id` filter is the membership that is always correct; `idx_messages_chat_id` keeps
-/// it from scanning `messages`, and the outer `IN` is a PK lookup on `reply_edges` per id
+/// `chat_id` filter is the membership that is always correct; `idx_messages_chat_timestamp`
+/// (its `chat_id` prefix) keeps it from scanning `messages`, and the outer `IN` is a PK lookup on `reply_edges` per id
 /// so `reply_edges` itself is never scanned. See docs/incremental-chunking-tail-scope.md
 /// "The reply/parent-ref pass is chat-local too".
 pub const DELETE_REPLY_EDGES_FOR_CHAT: &str = "DELETE FROM reply_edges

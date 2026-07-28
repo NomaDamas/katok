@@ -5,8 +5,8 @@
 
 use katok::{
     archive::{
-        Archive, DELETE_CHAT_CHUNKS_STATEMENTS, SCOPED_REF_REBUILD_STATEMENTS,
-        TAIL_REBUILD_START_QUERY,
+        Archive, DELETE_CHAT_CHUNKS_STATEMENTS, RAW_MESSAGES_FOR_CHAT_SINCE_QUERY,
+        SCOPED_REF_REBUILD_STATEMENTS, TAIL_REBUILD_START_QUERY,
     },
     chunking::{
         rebuild_chunks, rebuild_chunks_for_chats, rebuild_chunks_with_settings, ChunkSettings,
@@ -1357,7 +1357,7 @@ fn an_archive_built_before_the_indexes_existed_picks_them_up_when_it_is_reopened
         "idx_chunks_chat_started",
         "idx_parent_chunks_chat_started",
         "idx_chunk_parent_refs_parent",
-        "idx_messages_chat_id",
+        "idx_messages_chat_timestamp",
         "idx_chunk_messages_message",
     ] {
         archive
@@ -1422,6 +1422,130 @@ fn a_scoped_ref_rebuild_addresses_reply_tables_through_indexes_not_scans() {
     rebuild_chunks(&archive).expect("rebuild");
 
     assert_no_ref_table_scans(archive.connection(), "fresh archive");
+}
+
+/// The parenthesised constraint list SQLite reports for the `SEARCH messages` step of `plan`, or
+/// `""` if the plan has no such step. Taking the *last* `(` group skips the index name (which
+/// itself contains `timestamp`), so a check on this text sees only the bounds the index actually
+/// carried — `chat_id=?` alone versus `chat_id=? AND timestamp>?`.
+fn messages_search_bounds(plan: &str) -> String {
+    plan.split('|')
+        .map(str::trim)
+        .find(|step| step.starts_with("SEARCH messages"))
+        .and_then(|step| step.rsplit_once('('))
+        .map(|(_, bounds)| bounds.trim_end_matches(')').to_string())
+        .unwrap_or_default()
+}
+
+/// `raw_messages_for_chat_since` must reach one chat's tail through the index, never by walking
+/// `messages`. The raw `SCAN` was already off once `idx_messages_chat_timestamp` existed, but a
+/// bare `(chat_id)` index would still sort for the `ORDER BY` and re-check the floor row by row;
+/// this pins the whole win — no scan, no sort, and the `timestamp` floor pushed into the index —
+/// and owns it independently of the scoped ref pass that first introduced a messages index.
+#[test]
+fn raw_messages_for_chat_since_seeks_one_chat_tail_without_scanning_messages() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = Archive::open(&dir.path().join("archive.sqlite3")).expect("open archive");
+    archive.sync_messages(&fixture_messages()).expect("sync");
+    rebuild_chunks(&archive).expect("rebuild");
+    let conn = archive.connection();
+
+    let plan = query_plan(conn, RAW_MESSAGES_FOR_CHAT_SINCE_QUERY);
+    assert!(
+        !scanned_tables(&plan).contains(&"messages"),
+        "raw_messages_for_chat_since scans messages instead of seeking one chat\nplan: {plan}"
+    );
+    assert!(
+        !plan.contains("TEMP B-TREE"),
+        "raw_messages_for_chat_since sorts for its ORDER BY instead of reading it from the index\nplan: {plan}"
+    );
+    assert!(
+        messages_search_bounds(&plan).contains("timestamp"),
+        "the messages search does not push the timestamp floor into the index, so a scoped read \
+         still re-checks the whole chat\nplan: {plan}"
+    );
+
+    // Teeth (1): the `COALESCE(?2, '')` floor is what makes the range sargable. The `?2 IS NULL OR
+    // timestamp >= ?2` form this replaced selects the same rows but pushes only `chat_id=?`, so its
+    // bounds carry no `timestamp` — showing the assertion above distinguishes the two forms rather
+    // than passing on the index name.
+    let or_form = "SELECT account_hash, chat_id, chat_name, chat_type, message_id,
+            sender_nickname, timestamp, text, message_type
+     FROM messages
+     WHERE chat_id = ?1 AND (?2 IS NULL OR timestamp >= ?2)
+     ORDER BY timestamp, message_id";
+    let or_plan = query_plan(conn, or_form);
+    assert!(
+        !messages_search_bounds(&or_plan).contains("timestamp"),
+        "the non-sargable OR form should push only chat_id, not the floor\nplan: {or_plan}"
+    );
+
+    // Teeth (2): dropping the index is the only thing left that reaches `messages` by `chat_id`, so
+    // the live query falls back to a whole-table `SCAN`. This is the regression the item owns: if a
+    // later change removes `idx_messages_chat_timestamp`, this fails instead of silently scanning.
+    conn.execute_batch("DROP INDEX idx_messages_chat_timestamp;")
+        .expect("drop index");
+    let unindexed = query_plan(conn, RAW_MESSAGES_FOR_CHAT_SINCE_QUERY);
+    assert!(
+        scanned_tables(&unindexed).contains(&"messages"),
+        "without idx_messages_chat_timestamp the query should scan messages — the index it drops \
+         is not load-bearing for this read\nplan: {unindexed}"
+    );
+}
+
+/// The `COALESCE(?2, '')` floor is only an optimisation if it selects exactly the rows the
+/// `?2 IS NULL OR timestamp >= ?2` form did. It does because every stored `timestamp` is text and
+/// therefore `>= ''`, so a NULL floor still admits the whole chat; this pins that on real data for
+/// a NULL floor, a floor that starts mid-chat, and one past the end.
+#[test]
+fn the_sargable_floor_selects_the_same_rows_as_the_or_form() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = Archive::open(&dir.path().join("archive.sqlite3")).expect("open archive");
+    archive.sync_messages(&fixture_messages()).expect("sync");
+    rebuild_chunks(&archive).expect("rebuild");
+    let conn = archive.connection();
+
+    let chat_id: String = conn
+        .query_row("SELECT chat_id FROM messages LIMIT 1", [], |row| row.get(0))
+        .expect("a chat id");
+    let timestamps: Vec<String> = conn
+        .prepare("SELECT timestamp FROM messages WHERE chat_id = ?1 ORDER BY timestamp")
+        .expect("prepare")
+        .query_map(params![chat_id], |row| row.get::<_, String>(0))
+        .expect("query")
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("timestamps");
+    assert!(timestamps.len() >= 2, "fixture chat needs at least two messages");
+
+    let or_form = "SELECT account_hash, chat_id, chat_name, chat_type, message_id,
+            sender_nickname, timestamp, text, message_type
+     FROM messages
+     WHERE chat_id = ?1 AND (?2 IS NULL OR timestamp >= ?2)
+     ORDER BY timestamp, message_id";
+    // A NULL floor, a floor at the second message (drops the first), and one past every row.
+    for since in [
+        None,
+        Some(timestamps[1].clone()),
+        Some("9999-12-31T23:59:59Z".to_string()),
+    ] {
+        let rewritten: Vec<String> = archive
+            .raw_messages_for_chat_since(&chat_id, since.as_deref())
+            .expect("rewritten read")
+            .into_iter()
+            .map(|m| m.message_id)
+            .collect();
+        let expected: Vec<String> = conn
+            .prepare(or_form)
+            .expect("prepare or-form")
+            .query_map(params![chat_id, since], |row| row.get::<_, String>(4))
+            .expect("query or-form")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("or-form rows");
+        assert_eq!(
+            rewritten, expected,
+            "the sargable floor diverged from the OR form for since={since:?}"
+        );
+    }
 }
 
 /// Two chats with mint-format message ids, cross-chunk replies in each, and a third untouched
