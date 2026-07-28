@@ -52,6 +52,11 @@ pub fn rebuild_chunks_with_settings(archive: &Archive, settings: ChunkSettings) 
 ///
 /// Produces the same rows a full rebuild would: boundaries depend only on the previous message
 /// and never cross a chat, and `chunk_id` is derived from content rather than position.
+///
+/// This still re-chunks each touched chat's full history. Narrowing that to the tail after the
+/// last stable parent-window boundary is the next step; the rule for where that cut may start is
+/// documented in `docs/incremental-chunking-tail-scope.md` and pinned by
+/// `cutting_at_the_last_parent_window_reproduces_the_full_rebuild_tail`.
 pub fn rebuild_chunks_for_chats(
     archive: &Archive,
     settings: ChunkSettings,

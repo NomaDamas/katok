@@ -12,7 +12,7 @@ use katok::{
     fixture::read_fixture,
     types::RawMessage,
 };
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 fn fixture_messages() -> Vec<RawMessage> {
     let path =
@@ -255,6 +255,150 @@ fn synthetic_conversation() -> Vec<RawMessage> {
         });
     }
     messages
+}
+
+/// A chat whose chunks split into two parent windows.
+///
+/// Senders alternate every message 60s apart, so each message is its own chunk (a nickname change
+/// forces a boundary). The first six sit within the 300s parent-window gap and form one window; a
+/// 400s jump before the seventh opens a second window. `split` (6) is that window boundary — the
+/// first message of the last parent window.
+fn windowed_conversation() -> (Vec<RawMessage>, usize) {
+    let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+        .expect("base timestamp")
+        .with_timezone(&chrono::Utc);
+    let senders = ["보글이", "부리"];
+    let mut messages = Vec::new();
+    for idx in 0..12usize {
+        // First six march 60s apart; a 400s gap before index 6 forces the second window.
+        let offset = if idx < 6 {
+            60 * idx as i64
+        } else {
+            300 + 400 + 60 * (idx as i64 - 6)
+        };
+        messages.push(RawMessage {
+            account_hash: "acct".to_string(),
+            chat_id: "W".to_string(),
+            chat_name: "윈도우방".to_string(),
+            chat_type: "group".to_string(),
+            message_id: format!("w{idx:03}"),
+            sender_id: format!("u{}", idx % 2),
+            sender_nickname: senders[idx % 2].to_string(),
+            timestamp: base + chrono::Duration::seconds(offset),
+            text: format!("메시지 {idx}"),
+            message_type: "text".to_string(),
+            reply_to_message_id: None,
+        });
+    }
+    (messages, 6)
+}
+
+/// Every chunk artifact at or after `min_started_at`, joined across the child tables, as
+/// comparable text. Passing `None` returns the whole archive.
+fn tail_snapshot(conn: &Connection, min_started_at: Option<&str>) -> Vec<String> {
+    let mut rows = Vec::new();
+    for (label, sql) in [
+        (
+            "chunk",
+            "SELECT chunk_id, chat_id, sender_nickname, started_at, ended_at, message_count, text
+             FROM chunks
+             WHERE (?1 IS NULL OR started_at >= ?1)
+             ORDER BY chunk_id",
+        ),
+        (
+            "parent",
+            "SELECT parent_id, chat_id, started_at, ended_at, message_count, child_count, text
+             FROM parent_chunks
+             WHERE (?1 IS NULL OR started_at >= ?1)
+             ORDER BY parent_id",
+        ),
+        (
+            "chunk_message",
+            "SELECT cm.chunk_id, cm.message_id, cm.ordinal
+             FROM chunk_messages cm JOIN chunks c ON c.chunk_id = cm.chunk_id
+             WHERE (?1 IS NULL OR c.started_at >= ?1)
+             ORDER BY cm.chunk_id, cm.ordinal, cm.message_id",
+        ),
+        (
+            "parent_child",
+            "SELECT pcc.parent_id, pcc.chunk_id, pcc.ordinal
+             FROM parent_chunk_children pcc JOIN parent_chunks p ON p.parent_id = pcc.parent_id
+             WHERE (?1 IS NULL OR p.started_at >= ?1)
+             ORDER BY pcc.parent_id, pcc.ordinal, pcc.chunk_id",
+        ),
+        (
+            "parent_ref",
+            "SELECT r.child_chunk_id, r.parent_chunk_id
+             FROM chunk_parent_refs r JOIN chunks c ON c.chunk_id = r.child_chunk_id
+             WHERE (?1 IS NULL OR c.started_at >= ?1)
+             ORDER BY r.child_chunk_id, r.parent_chunk_id",
+        ),
+        (
+            "fts",
+            "SELECT f.chunk_id, f.text
+             FROM chunks_fts f JOIN chunks c ON c.chunk_id = f.chunk_id
+             WHERE (?1 IS NULL OR c.started_at >= ?1)
+             ORDER BY f.chunk_id",
+        ),
+    ] {
+        let mut stmt = conn.prepare(sql).expect("prepare tail snapshot query");
+        let count = stmt.column_count();
+        let mapped = stmt
+            .query_map(params![min_started_at], |row| {
+                let mut cells = Vec::with_capacity(count);
+                for idx in 0..count {
+                    let cell = row
+                        .get::<_, String>(idx)
+                        .or_else(|_| row.get::<_, i64>(idx).map(|n| n.to_string()))
+                        .unwrap_or_else(|_| "<null>".to_string());
+                    cells.push(cell);
+                }
+                Ok(format!("{label}|{}", cells.join("|")))
+            })
+            .expect("run tail snapshot query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect tail snapshot rows");
+        rows.extend(mapped);
+    }
+    rows
+}
+
+#[test]
+fn cutting_at_the_last_parent_window_reproduces_the_full_rebuild_tail() {
+    // Pins the tail-scope rule (docs/incremental-chunking-tail-scope.md): rebuilding a chat from
+    // only its last parent window's first message must produce byte-identical rows to the tail of
+    // a full rebuild of the whole chat. If a boundary stops being local, or a closed parent window
+    // starts depending on later chunks, this diverges.
+    let (messages, split) = windowed_conversation();
+    let threshold = messages[split].timestamp.to_rfc3339();
+
+    // Full rebuild of the whole chat.
+    let full_dir = tempfile::tempdir().expect("tempdir");
+    let full = Archive::open(&full_dir.path().join("archive.sqlite3")).expect("open archive");
+    full.sync_messages(&messages).expect("sync");
+    rebuild_chunks(&full).expect("full rebuild");
+
+    // The fixture must actually exercise a non-trivial cut: two windows, with rows on both sides.
+    let window_count: i64 = full
+        .connection()
+        .query_row("SELECT COUNT(*) FROM parent_chunks", [], |row| row.get(0))
+        .expect("count windows");
+    assert_eq!(window_count, 2, "fixture must form exactly two parent windows");
+    let before_cut = tail_snapshot(full.connection(), None).len()
+        - tail_snapshot(full.connection(), Some(&threshold)).len();
+    assert!(before_cut > 0, "fixture must have artifacts before the cut");
+
+    // Rebuild an archive holding only the tail — messages from the last window's start onward.
+    let tail_dir = tempfile::tempdir().expect("tempdir");
+    let tail = Archive::open(&tail_dir.path().join("archive.sqlite3")).expect("open archive");
+    tail.sync_messages(&messages[split..]).expect("sync tail");
+    rebuild_chunks(&tail).expect("tail rebuild");
+
+    assert_eq!(
+        tail_snapshot(full.connection(), Some(&threshold)),
+        tail_snapshot(tail.connection(), None),
+        "rebuilding from the last window's start diverged from the full rebuild's tail"
+    );
 }
 
 #[test]
