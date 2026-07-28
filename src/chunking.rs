@@ -1,5 +1,6 @@
 use crate::{
     archive::{Archive, ChunkDraft, StoredMessage},
+    types::TouchedChat,
     Result,
 };
 use sha2::{Digest, Sha256};
@@ -48,22 +49,34 @@ pub fn rebuild_chunks_with_settings(archive: &Archive, settings: ChunkSettings) 
     Ok(count)
 }
 
-/// Recompute chunks for `chat_ids` only, leaving other chats untouched.
+/// Recompute chunks for the touched chats only, scoped to the tail past the last stable
+/// parent-window boundary, leaving other chats and each touched chat's earlier chunks untouched.
 ///
-/// Produces the same rows a full rebuild would: boundaries depend only on the previous message
-/// and never cross a chat, and `chunk_id` is derived from content rather than position.
+/// Produces the same rows a full rebuild would: boundaries depend only on the previous message and
+/// never cross a chat, `chunk_id` is derived from content rather than position, and the cut is a
+/// time-gap window boundary that no change past it can move. The rule and its correctness proof
+/// are documented in `docs/incremental-chunking-tail-scope.md` and pinned by
+/// `cutting_at_the_last_parent_window_reproduces_the_full_rebuild_tail`.
+///
+/// A chat whose earliest change lands before any interior boundary (empty timestamp forces this)
+/// is rebuilt whole. Reply and cross-chunk parent references join across chats, so they are
+/// rebuilt once after every touched chat is replaced.
 pub fn rebuild_chunks_for_chats(
     archive: &Archive,
     settings: ChunkSettings,
-    chat_ids: &[String],
+    touched: &[TouchedChat],
 ) -> Result<usize> {
-    if chat_ids.is_empty() {
+    if touched.is_empty() {
         return archive.chunk_count();
     }
-    let messages = archive.raw_messages_for_chats(chat_ids)?;
-    let drafts = build_chunks(&messages, settings)?;
-    let parents = build_parent_windows(&drafts)?;
-    archive.replace_chunks_for_chats(chat_ids, &drafts, &parents)?;
+    for chat in touched {
+        let from = archive.tail_rebuild_start(&chat.chat_id, &chat.earliest_changed_timestamp)?;
+        let messages = archive.raw_messages_for_chat_since(&chat.chat_id, from.as_deref())?;
+        let drafts = build_chunks(&messages, settings)?;
+        let parents = build_parent_windows(&drafts)?;
+        archive.replace_chunk_tail(&chat.chat_id, from.as_deref(), &drafts, &parents)?;
+    }
+    archive.rebuild_reply_and_parent_refs()?;
     archive.chunk_count()
 }
 

@@ -27,10 +27,27 @@ pub struct SyncReport {
     /// Wall-clock milliseconds per stage, so "sync is slow" can be answered with a number
     /// instead of a guess about which stage is at fault.
     pub timings_ms: SyncTimings,
-    /// Which chats changed. Internal: the caller uses it to scope the chunk rebuild, and it is
-    /// too long on a first sync to be worth printing.
+    /// Which chats changed, and where the earliest change landed in each. Internal: the caller
+    /// uses it to scope the chunk rebuild to the tail after the last stable window boundary, and
+    /// it is too long on a first sync to be worth printing.
     #[serde(skip)]
-    pub touched_chats: Vec<String>,
+    pub touched_chats: Vec<TouchedChat>,
+}
+
+/// A chat that changed this sync, with the earliest changed message's send-order key.
+///
+/// The key `(timestamp, message_id)` is what scopes the rebuild: only chunks and parent windows
+/// from the last window boundary before this key onward can have moved. See
+/// `docs/incremental-chunking-tail-scope.md`.
+#[derive(Debug, Clone)]
+pub struct TouchedChat {
+    pub chat_id: String,
+    /// RFC3339 timestamp of the earliest inserted-or-updated message in this chat.
+    pub earliest_changed_timestamp: String,
+    /// Message id of that same earliest-changed message. Currently unread: the
+    /// gap-derived cut guarantees a >=300s separation at `P`, so `started_at >= P`
+    /// needs no tiebreak. Kept so the report states the full change key.
+    pub earliest_changed_message_id: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
