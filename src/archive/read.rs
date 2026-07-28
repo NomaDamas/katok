@@ -149,6 +149,84 @@ impl Archive {
 
     /// Messages of one chat in send order, optionally from `since` (RFC3339) onward.
     ///
+    /// Same rows and same order as [`Archive::raw_messages`] for that chat. `None` reads the whole
+    /// chat; a floor reads only the tail the scoped rebuild recomputes.
+    pub fn raw_messages_for_chat_since(
+        &self,
+        chat_id: &str,
+        since: Option<&str>,
+    ) -> Result<Vec<StoredMessage>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT account_hash, chat_id, chat_name, chat_type, message_id,
+                    sender_nickname, timestamp, text, message_type
+             FROM messages
+             WHERE chat_id = ?1 AND (?2 IS NULL OR timestamp >= ?2)
+             ORDER BY timestamp, message_id",
+            )
+            .map_err(Error::Sql)?;
+        let rows = stmt
+            .query_map(params![chat_id, since], StoredMessage::from_row)
+            .map_err(Error::Sql)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Sql)?;
+        Ok(rows)
+    }
+
+    /// The `started_at` a scoped rebuild of `chat_id` may start from, given the earliest changed
+    /// message's timestamp, or `None` when the whole chat must be rebuilt.
+    ///
+    /// Walks the chat's existing chunks backward from the change and returns the start of the
+    /// newest chunk whose gap to its predecessor exceeds `DEFAULT_PARENT_WINDOW_SECONDS`. That
+    /// chunk begins a parent window that a time gap fixes independently of any character
+    /// accumulation, so it is a stable boundary: everything before it is provably identical to a
+    /// full rebuild (docs/incremental-chunking-tail-scope.md). If no such interior boundary exists
+    /// the chat has no gap to cut at and is rebuilt whole.
+    ///
+    /// Reading from a time-gap boundary rather than the theoretically-minimal last window means a
+    /// character-split window is recomputed rather than reused, which stays correct and keeps the
+    /// scope independent of room size (bounded by the current conversation burst).
+    pub fn tail_rebuild_start(
+        &self,
+        chat_id: &str,
+        earliest_changed_timestamp: &str,
+    ) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT started_at, ended_at FROM chunks
+                 WHERE chat_id = ?1 AND started_at < ?2
+                 ORDER BY started_at DESC",
+            )
+            .map_err(Error::Sql)?;
+        let mut rows = stmt
+            .query(params![chat_id, earliest_changed_timestamp])
+            .map_err(Error::Sql)?;
+
+        // Iterating newest-first, `newer_started_at` holds the chunk just above the current row;
+        // the current (older) row's `ended_at` and that start bound the gap between them.
+        let mut newer_started_at: Option<String> = None;
+        while let Some(row) = rows.next().map_err(Error::Sql)? {
+            let started_at: String = row.get(0).map_err(Error::Sql)?;
+            let ended_at: String = row.get(1).map_err(Error::Sql)?;
+            if let Some(newer) = &newer_started_at {
+                let older_end =
+                    chrono::DateTime::parse_from_rfc3339(&ended_at).map_err(Error::Time)?;
+                let newer_start =
+                    chrono::DateTime::parse_from_rfc3339(newer).map_err(Error::Time)?;
+                let gap = newer_start.signed_duration_since(older_end).num_seconds();
+                if gap > crate::chunking::DEFAULT_PARENT_WINDOW_SECONDS {
+                    return Ok(Some(newer.clone()));
+                }
+            }
+            newer_started_at = Some(started_at);
+        }
+        Ok(None)
+    }
+
+    /// Messages of one chat in send order, optionally from `since` (RFC3339) onward.
+    ///
     /// Timestamps are stored as RFC3339 text, which sorts and compares lexicographically in the
     /// same order as the instants it encodes, so the range filter needs no conversion.
     pub fn messages_for_transcript(

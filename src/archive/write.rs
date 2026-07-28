@@ -1,6 +1,6 @@
 use super::{Archive, ChunkDraft, ParentChunkDraft};
 use crate::{
-    types::{RawMessage, SyncReport},
+    types::{RawMessage, SyncReport, TouchedChat},
     Error, Result,
 };
 use chrono::{DateTime, Utc};
@@ -27,18 +27,34 @@ impl Archive {
         // than the newest one.
         let mut cursors: HashMap<&str, &DateTime<Utc>> = HashMap::new();
 
-        // Chats whose messages actually changed. Only these need their chunks recomputed;
-        // chunk boundaries never reach across chats, so the rest are provably untouched.
-        let mut touched_chats: Vec<String> = Vec::new();
-        let mut touched_seen: HashSet<&str> = HashSet::new();
+        // Chats whose messages actually changed, and where the earliest change landed in each.
+        // Only these need their chunks recomputed; chunk boundaries never reach across chats, so
+        // the rest are provably untouched. The earliest changed key scopes the rebuild to the
+        // tail past the last stable window boundary (docs/incremental-chunking-tail-scope.md).
+        // Insertion order is preserved so `rebuilt_chats` and the rebuild are deterministic.
+        let mut touched_order: Vec<&str> = Vec::new();
+        let mut earliest_changed: HashMap<&str, (String, &str)> = HashMap::new();
 
         for message in messages {
             if seen_chats.insert(message.chat_id.as_str()) {
                 self.upsert_chat(message)?;
             }
             let change = self.upsert_message(message)?;
-            if change != MessageChange::Unchanged && touched_seen.insert(message.chat_id.as_str()) {
-                touched_chats.push(message.chat_id.clone());
+            if change != MessageChange::Unchanged {
+                let key = (message.timestamp.to_rfc3339(), message.message_id.as_str());
+                earliest_changed
+                    .entry(message.chat_id.as_str())
+                    .and_modify(|earliest| {
+                        // Compare by the send-order key `(timestamp, message_id)`, matching
+                        // `raw_messages ORDER BY chat_id, timestamp, message_id`.
+                        if (key.0.as_str(), key.1) < (earliest.0.as_str(), earliest.1) {
+                            *earliest = (key.0.clone(), key.1);
+                        }
+                    })
+                    .or_insert_with(|| {
+                        touched_order.push(message.chat_id.as_str());
+                        (key.0, key.1)
+                    });
             }
             inserted += usize::from(change == MessageChange::Inserted);
             updated += usize::from(change == MessageChange::Updated);
@@ -56,6 +72,18 @@ impl Archive {
             self.update_cursor(source_id, newest)?;
         }
 
+        let touched_chats: Vec<TouchedChat> = touched_order
+            .into_iter()
+            .map(|chat_id| {
+                let (timestamp, message_id) = &earliest_changed[chat_id];
+                TouchedChat {
+                    chat_id: chat_id.to_string(),
+                    earliest_changed_timestamp: timestamp.clone(),
+                    earliest_changed_message_id: message_id.to_string(),
+                }
+            })
+            .collect();
+
         Ok(SyncReport {
             inserted_messages: inserted,
             updated_messages: updated,
@@ -68,51 +96,72 @@ impl Archive {
         })
     }
 
-    /// Drop every chunk artifact belonging to `chat_id`.
+    /// Drop the chunk artifacts of `chat_id` whose start is at or after `from_started_at`.
     ///
-    /// The FTS rows go first: they are located through `chunks`, which the last statement
-    /// removes.
-    fn delete_chat_chunks(&self, chat_id: &str) -> Result<()> {
+    /// `None` drops the whole chat. A non-null floor drops only the tail: because the recompute
+    /// start is a parent-window boundary preceded by a gap over `DEFAULT_PARENT_WINDOW_SECONDS`,
+    /// no kept chunk or window shares that `started_at`, so a plain `started_at >= floor`
+    /// comparison needs no message-id tiebreak (docs/incremental-chunking-tail-scope.md).
+    ///
+    /// The FTS rows go first: they are located through `chunks`, which the last statement removes.
+    fn delete_chat_chunks(&self, chat_id: &str, from_started_at: Option<&str>) -> Result<()> {
         for sql in [
             "DELETE FROM chunks_fts
-             WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE chat_id = ?1)",
+             WHERE chunk_id IN (SELECT chunk_id FROM chunks
+                WHERE chat_id = ?1 AND (?2 IS NULL OR started_at >= ?2))",
             "DELETE FROM chunk_messages
-             WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE chat_id = ?1)",
+             WHERE chunk_id IN (SELECT chunk_id FROM chunks
+                WHERE chat_id = ?1 AND (?2 IS NULL OR started_at >= ?2))",
             "DELETE FROM chunk_parent_refs
-             WHERE child_chunk_id IN (SELECT chunk_id FROM chunks WHERE chat_id = ?1)
-                OR parent_chunk_id IN (SELECT chunk_id FROM chunks WHERE chat_id = ?1)",
+             WHERE child_chunk_id IN (SELECT chunk_id FROM chunks
+                    WHERE chat_id = ?1 AND (?2 IS NULL OR started_at >= ?2))
+                OR parent_chunk_id IN (SELECT chunk_id FROM chunks
+                    WHERE chat_id = ?1 AND (?2 IS NULL OR started_at >= ?2))",
             "DELETE FROM parent_chunk_children
-             WHERE parent_id IN (SELECT parent_id FROM parent_chunks WHERE chat_id = ?1)",
-            "DELETE FROM parent_chunks WHERE chat_id = ?1",
-            "DELETE FROM chunks WHERE chat_id = ?1",
+             WHERE parent_id IN (SELECT parent_id FROM parent_chunks
+                WHERE chat_id = ?1 AND (?2 IS NULL OR started_at >= ?2))",
+            "DELETE FROM parent_chunks
+             WHERE chat_id = ?1 AND (?2 IS NULL OR started_at >= ?2)",
+            "DELETE FROM chunks
+             WHERE chat_id = ?1 AND (?2 IS NULL OR started_at >= ?2)",
         ] {
             self.conn
-                .execute(sql, params![chat_id])
+                .execute(sql, params![chat_id, from_started_at])
                 .map_err(Error::Sql)?;
         }
         Ok(())
     }
 
-    /// Replace the chunks of `chat_ids` only, leaving every other chat's rows in place.
+    /// Replace one chat's chunk tail from `from_started_at` onward, leaving its earlier chunks and
+    /// every other chat's rows in place. `None` replaces the whole chat.
     ///
-    /// Safe because a chunk boundary is decided by looking at the previous message alone and
-    /// never reaches across chats, so recomputing one chat yields byte-identical rows to a full
-    /// rebuild — `chunk_id` is derived from content, not from position in the archive.
-    pub fn replace_chunks_for_chats(
+    /// Safe because a chunk boundary is decided by looking at the previous message alone and never
+    /// reaches across chats, and `from_started_at` is a stable parent-window boundary, so the kept
+    /// prefix is byte-identical to a full rebuild — `chunk_id` is derived from content, not from
+    /// position in the archive. Reply and parent references are archive-wide and are rebuilt once
+    /// by the caller after every touched chat is replaced.
+    pub fn replace_chunk_tail(
         &self,
-        chat_ids: &[String],
+        chat_id: &str,
+        from_started_at: Option<&str>,
         chunks: &[ChunkDraft],
         parents: &[ParentChunkDraft],
     ) -> Result<()> {
-        for chat_id in chat_ids {
-            self.delete_chat_chunks(chat_id)?;
-        }
+        self.delete_chat_chunks(chat_id, from_started_at)?;
         for chunk in chunks {
             self.insert_chunk(chunk)?;
         }
         for parent in parents {
             self.insert_parent_chunk(parent)?;
         }
+        Ok(())
+    }
+
+    /// Rebuild the archive-wide reply edges and cross-chunk parent references.
+    ///
+    /// These join across every chat, so they are recomputed once after a scoped rebuild rather
+    /// than per touched chat.
+    pub fn rebuild_reply_and_parent_refs(&self) -> Result<()> {
         self.rebuild_parent_refs()
     }
 

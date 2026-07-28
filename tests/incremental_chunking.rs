@@ -10,9 +10,19 @@ use katok::{
         CHUNKER_VERSION,
     },
     fixture::read_fixture,
-    types::RawMessage,
+    types::{RawMessage, TouchedChat},
 };
 use rusqlite::{params, Connection};
+
+/// A `TouchedChat` that forces a whole-chat rebuild: an empty key sorts before every stored
+/// timestamp, so `tail_rebuild_start` finds no interior boundary and rebuilds from the start.
+fn whole_chat(chat_id: &str) -> TouchedChat {
+    TouchedChat {
+        chat_id: chat_id.to_string(),
+        earliest_changed_timestamp: String::new(),
+        earliest_changed_message_id: String::new(),
+    }
+}
 
 fn fixture_messages() -> Vec<RawMessage> {
     let path =
@@ -103,7 +113,8 @@ fn per_chat_rebuild_matches_a_full_rebuild_of_the_same_archive() {
     // Seed with a full pass, then throw every chat back through the scoped path: if the scoped
     // path drifts in either direction (drops rows, or leaves stale ones behind) this diverges.
     rebuild_chunks(&scoped).expect("seed rebuild");
-    rebuild_chunks_for_chats(&scoped, settings(), &chats).expect("scoped rebuild");
+    let touched: Vec<TouchedChat> = chats.iter().map(|id| whole_chat(id)).collect();
+    rebuild_chunks_for_chats(&scoped, settings(), &touched).expect("scoped rebuild");
 
     assert_eq!(
         snapshot(full.connection()),
@@ -204,7 +215,7 @@ fn rebuilding_one_chat_leaves_the_other_chats_untouched() {
     rebuild_chunks(&archive).expect("full rebuild");
 
     let before = snapshot(archive.connection());
-    rebuild_chunks_for_chats(&archive, settings(), &chats[..1]).expect("scoped rebuild");
+    rebuild_chunks_for_chats(&archive, settings(), &[whole_chat(&chats[0])]).expect("scoped rebuild");
     let after = snapshot(archive.connection());
 
     assert_eq!(
@@ -361,6 +372,81 @@ fn tail_snapshot(conn: &Connection, min_started_at: Option<&str>) -> Vec<String>
         rows.extend(mapped);
     }
     rows
+}
+
+/// Three conversation bursts in one chat, each separated by a gap over the 300s parent-window
+/// gap, so the archive holds three parent windows. Senders alternate 60s apart within a burst, so
+/// every message is its own chunk. `split` (6) is the boundary between the second and third burst.
+fn bursty_conversation() -> (Vec<RawMessage>, usize) {
+    let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+        .expect("base timestamp")
+        .with_timezone(&chrono::Utc);
+    let senders = ["보글이", "부리"];
+    // Burst n starts 400s + 60s*3 after the previous, well past the 300s window gap.
+    let starts = [0i64, 520, 1040];
+    let mut messages = Vec::new();
+    let mut idx = 0usize;
+    for (burst, start) in starts.iter().enumerate() {
+        for within in 0..3usize {
+            messages.push(RawMessage {
+                account_hash: "acct".to_string(),
+                chat_id: "G".to_string(),
+                chat_name: "버스트방".to_string(),
+                chat_type: "group".to_string(),
+                message_id: format!("g{burst}{within}"),
+                sender_id: format!("u{}", idx % 2),
+                sender_nickname: senders[idx % 2].to_string(),
+                timestamp: base + chrono::Duration::seconds(start + 60 * within as i64),
+                text: format!("메시지 {idx}"),
+                message_type: "text".to_string(),
+                reply_to_message_id: None,
+            });
+            idx += 1;
+        }
+    }
+    (messages, 6)
+}
+
+#[test]
+fn an_incremental_wave_after_a_gap_rebuilds_only_the_tail_and_matches_a_full_rebuild() {
+    // The scoped path must (a) actually engage — resolve a recompute start inside the chat rather
+    // than rebuilding it whole — and (b) still land byte-identical to a full rebuild.
+    let (messages, split) = bursty_conversation();
+
+    let full_dir = tempfile::tempdir().expect("tempdir");
+    let full = Archive::open(&full_dir.path().join("archive.sqlite3")).expect("open archive");
+    full.sync_messages(&messages).expect("sync");
+    rebuild_chunks(&full).expect("full rebuild");
+
+    let staged_dir = tempfile::tempdir().expect("tempdir");
+    let staged = Archive::open(&staged_dir.path().join("archive.sqlite3")).expect("open archive");
+    // First wave seeds the first two bursts (two windows), the second wave appends the third.
+    let seed = staged
+        .sync_messages(&messages[..split])
+        .expect("sync wave one");
+    rebuild_chunks_for_chats(&staged, settings(), &seed.touched_chats).expect("seed rebuild");
+
+    let wave = staged
+        .sync_messages(&messages[split..])
+        .expect("sync wave two");
+    // The change is the third burst; the resolver must cut at the second burst's start (the last
+    // gap boundary among existing chunks), not fall back to a whole-chat rebuild.
+    let cut = staged
+        .tail_rebuild_start("G", &wave.touched_chats[0].earliest_changed_timestamp)
+        .expect("resolve cut");
+    let expected_cut = messages[3].timestamp.to_rfc3339();
+    assert_eq!(
+        cut,
+        Some(expected_cut),
+        "the wave should scope to the last gap boundary, not rebuild the whole chat"
+    );
+    rebuild_chunks_for_chats(&staged, settings(), &wave.touched_chats).expect("scoped rebuild");
+
+    assert_eq!(
+        snapshot(full.connection()),
+        snapshot(staged.connection()),
+        "the tail-scoped incremental wave diverged from a full rebuild"
+    );
 }
 
 #[test]
