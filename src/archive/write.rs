@@ -40,6 +40,70 @@ pub const DELETE_CHAT_CHUNKS_STATEMENTS: [&str; 6] = [
      WHERE chat_id = ?1 AND started_at >= COALESCE(?2, '')",
 ];
 
+/// Statements [`Archive::rebuild_reply_and_parent_refs_for_chats`] runs per touched chat.
+///
+/// Bound as `(?1 = chat_id)`. They live here so the query-plan test asserts against the text
+/// that actually runs — a copy in the test would let a rewrite reintroduce an archive-wide
+/// scan (for example `LIKE ? || '-%'` or an unindexed join) without anything failing.
+///
+/// Membership is by `messages.chat_id`, not by a `child_message_id` string prefix: the mint
+/// invariant `message_id = {chat_id}-{log_id}` holds in production, but fixtures and any
+/// pre-mint row are free-form, and the two are equivalent only when the mint holds. The
+/// `chat_id` filter is the membership that is always correct; `idx_messages_chat_id` keeps
+/// it from scanning `messages`, and the outer `IN` is a PK lookup on `reply_edges` per id
+/// so `reply_edges` itself is never scanned. See docs/incremental-chunking-tail-scope.md
+/// "The reply/parent-ref pass is chat-local too".
+pub const DELETE_REPLY_EDGES_FOR_CHAT: &str = "DELETE FROM reply_edges
+     WHERE child_message_id IN (
+        SELECT message_id FROM messages WHERE chat_id = ?1
+     )";
+
+pub const INSERT_REPLY_EDGES_FOR_CHAT: &str = "INSERT OR IGNORE INTO reply_edges
+        (child_message_id, parent_message_id, unresolved_reason)
+     SELECT message_id, reply_to_message_id, 'parent_not_in_archive'
+     FROM messages
+     WHERE reply_to_message_id IS NOT NULL
+       AND chat_id = ?1";
+
+pub const INSERT_CHUNK_PARENT_REFS_FOR_CHAT: &str =
+    "INSERT OR IGNORE INTO chunk_parent_refs(child_chunk_id, parent_chunk_id)
+     SELECT child.chunk_id, parent.chunk_id
+     FROM messages child_msg
+     JOIN chunk_messages child ON child.message_id = child_msg.message_id
+     JOIN chunk_messages parent ON parent.message_id = child_msg.reply_to_message_id
+     WHERE child_msg.reply_to_message_id IS NOT NULL
+       AND child_msg.chat_id = ?1
+       AND child.chunk_id != parent.chunk_id";
+
+pub const RESOLVE_REPLY_EDGES_FOR_CHAT: &str = "UPDATE reply_edges
+     SET child_chunk_id = (
+        SELECT child.chunk_id FROM chunk_messages child
+        WHERE child.message_id = reply_edges.child_message_id LIMIT 1
+     ),
+     parent_chunk_id = (
+        SELECT parent.chunk_id FROM chunk_messages parent
+        WHERE parent.message_id = reply_edges.parent_message_id LIMIT 1
+     ),
+     unresolved_reason = CASE
+        WHEN (
+            SELECT parent.chunk_id FROM chunk_messages parent
+            WHERE parent.message_id = reply_edges.parent_message_id LIMIT 1
+        ) IS NULL THEN 'parent_not_in_archive'
+        ELSE NULL
+     END
+     WHERE child_message_id IN (
+        SELECT message_id FROM messages
+        WHERE chat_id = ?1 AND reply_to_message_id IS NOT NULL
+     )";
+
+/// The four statements of a per-chat ref rebuild, in order, for query-plan tests.
+pub const SCOPED_REF_REBUILD_STATEMENTS: [&str; 4] = [
+    DELETE_REPLY_EDGES_FOR_CHAT,
+    INSERT_REPLY_EDGES_FOR_CHAT,
+    INSERT_CHUNK_PARENT_REFS_FOR_CHAT,
+    RESOLVE_REPLY_EDGES_FOR_CHAT,
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MessageChange {
     Inserted,
@@ -153,8 +217,9 @@ impl Archive {
     /// Safe because a chunk boundary is decided by looking at the previous message alone and never
     /// reaches across chats, and `from_started_at` is a stable parent-window boundary, so the kept
     /// prefix is byte-identical to a full rebuild — `chunk_id` is derived from content, not from
-    /// position in the archive. Reply and parent references are archive-wide and are rebuilt once
-    /// by the caller after every touched chat is replaced.
+    /// position in the archive. Reply and parent references are chat-local (see
+    /// `docs/incremental-chunking-tail-scope.md`) and are rebuilt for the touched chats by the
+    /// caller after every touched chat is replaced.
     pub fn replace_chunk_tail(
         &self,
         chat_id: &str,
@@ -172,12 +237,30 @@ impl Archive {
         Ok(())
     }
 
-    /// Rebuild the archive-wide reply edges and cross-chunk parent references.
+    /// Rebuild reply edges and cross-chunk parent references for the whole archive.
     ///
-    /// These join across every chat, so they are recomputed once after a scoped rebuild rather
-    /// than per touched chat.
+    /// Used by the full-rebuild path (`replace_chunks`). Scoped sync uses
+    /// [`Self::rebuild_reply_and_parent_refs_for_chats`] instead — every edge is owned by
+    /// exactly one `chat_id`, so the union of per-chat rebuilds equals this wipe-and-refill.
     pub fn rebuild_reply_and_parent_refs(&self) -> Result<()> {
-        self.rebuild_parent_refs()
+        self.rebuild_parent_refs_all()
+    }
+
+    /// Rebuild reply edges and cross-chunk parent references for only the given chats.
+    ///
+    /// Scope unit is `chat_id` (never account): a multi-account room must rebuild as one unit.
+    /// Untouched chats' rows are left in place and are byte-identical to a full rebuild because
+    /// their child messages did not change this sync. Statement texts are
+    /// [`SCOPED_REF_REBUILD_STATEMENTS`].
+    pub fn rebuild_reply_and_parent_refs_for_chats(&self, chat_ids: &[&str]) -> Result<()> {
+        let mut seen: HashSet<&str> = HashSet::new();
+        for &chat_id in chat_ids {
+            if !seen.insert(chat_id) {
+                continue;
+            }
+            self.rebuild_parent_refs_for_chat(chat_id)?;
+        }
+        Ok(())
     }
 
     pub fn replace_chunks(
@@ -201,7 +284,7 @@ impl Archive {
         for parent in parents {
             self.insert_parent_chunk(parent)?;
         }
-        self.rebuild_parent_refs()
+        self.rebuild_parent_refs_all()
     }
 
     fn upsert_chat(&self, message: &RawMessage) -> Result<()> {
@@ -412,7 +495,7 @@ impl Archive {
             .map_err(Error::Sql)
     }
 
-    fn rebuild_parent_refs(&self) -> Result<()> {
+    fn rebuild_parent_refs_all(&self) -> Result<()> {
         self.conn
             .execute_batch("DELETE FROM reply_edges;")
             .map_err(Error::Sql)?;
@@ -459,6 +542,15 @@ impl Archive {
                 [],
             )
             .map_err(Error::Sql)?;
+        Ok(())
+    }
+
+    fn rebuild_parent_refs_for_chat(&self, chat_id: &str) -> Result<()> {
+        for sql in SCOPED_REF_REBUILD_STATEMENTS {
+            self.conn
+                .execute(sql, params![chat_id])
+                .map_err(Error::Sql)?;
+        }
         Ok(())
     }
 }

@@ -10,7 +10,10 @@ mod write;
 
 pub use model::{ChunkDraft, ParentChunkDraft, StoredMessage};
 pub use read::TAIL_REBUILD_START_QUERY;
-pub use write::DELETE_CHAT_CHUNKS_STATEMENTS;
+pub use write::{
+    DELETE_CHAT_CHUNKS_STATEMENTS, DELETE_REPLY_EDGES_FOR_CHAT, INSERT_CHUNK_PARENT_REFS_FOR_CHAT,
+    INSERT_REPLY_EDGES_FOR_CHAT, RESOLVE_REPLY_EDGES_FOR_CHAT, SCOPED_REF_REBUILD_STATEMENTS,
+};
 
 pub struct Archive {
     pub(super) conn: Connection,

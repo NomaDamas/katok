@@ -98,7 +98,17 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         -- `chunk_parent_refs` has a primary key on `(child_chunk_id, parent_chunk_id)`, which
         -- serves the child half of the tail delete's OR but leaves the parent half scanning.
         CREATE INDEX IF NOT EXISTS idx_chunk_parent_refs_parent
-            ON chunk_parent_refs(parent_chunk_id);",
+            ON chunk_parent_refs(parent_chunk_id);
+
+        -- The scoped reply/parent-ref pass filters `messages` by `chat_id` and joins
+        -- `chunk_messages` by `message_id`. Neither column is a primary-key prefix
+        -- (`messages` is `(account_hash, chat_id, message_id)`, `chunk_messages` is
+        -- `(chunk_id, message_id)`), so without these every touched-chat ref rebuild
+        -- would scan the whole archive — the cost the scope exists to remove.
+        CREATE INDEX IF NOT EXISTS idx_messages_chat_id
+            ON messages(chat_id);
+        CREATE INDEX IF NOT EXISTS idx_chunk_messages_message
+            ON chunk_messages(message_id);",
     )
     .map_err(Error::Sql)?;
 

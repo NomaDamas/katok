@@ -4,7 +4,10 @@
 //! archive it leaves behind is indistinguishable from the one the slow path built.
 
 use katok::{
-    archive::{Archive, DELETE_CHAT_CHUNKS_STATEMENTS, TAIL_REBUILD_START_QUERY},
+    archive::{
+        Archive, DELETE_CHAT_CHUNKS_STATEMENTS, SCOPED_REF_REBUILD_STATEMENTS,
+        TAIL_REBUILD_START_QUERY,
+    },
     chunking::{
         rebuild_chunks, rebuild_chunks_for_chats, rebuild_chunks_with_settings, ChunkSettings,
         CHUNKER_VERSION,
@@ -1061,8 +1064,8 @@ fn a_large_single_room_tail_matches_a_full_rebuild_and_cost_tracks_new_messages(
         .expect("count parent refs");
     assert!(parent_refs > 0, "large fixture must keep non-empty chunk_parent_refs");
 
-    // Residual decomposition: the archive-wide ref pass alone is a large fraction of the scoped
-    // floor (indexes on chunks are absent — see docs residual-cost section).
+    // Residual decomposition: full-archive ref rebuild alone (the pre-scope baseline). Scoped
+    // sync no longer pays this; it rebuilds refs only for the touched chats.
     let ref_started = std::time::Instant::now();
     large
         .rebuild_reply_and_parent_refs()
@@ -1070,8 +1073,8 @@ fn a_large_single_room_tail_matches_a_full_rebuild_and_cost_tracks_new_messages(
     let ref_only_ms = ref_started.elapsed().as_millis();
 
     // Cost claim: scoped one-message append is far cheaper than whole-chat on the same room.
-    // Residual still grows with archive size (ref pass + unindexed scans), so we do not require
-    // scoped(100k) ≈ scoped(200); we require scoped ≪ whole-chat for this room.
+    // After chunk indexes + scoped refs, residual should track the touched tail rather than
+    // archive size; we still only require scoped ≪ whole-chat here (step-4 measures the rest).
     assert!(
         large_scoped_ms * 10 < whole_seed_ms,
         "scoped append ({large_scoped_ms}ms) must be at least 10x faster than whole-chat seed \
@@ -1085,16 +1088,32 @@ fn a_large_single_room_tail_matches_a_full_rebuild_and_cost_tracks_new_messages(
 }
 
 /// The `EXPLAIN QUERY PLAN` step for one statement, joined into one line.
+///
+/// Binds the two placeholders the chunk-tail statements use (`chat_id`, optional floor). Scoped
+/// ref statements take only `chat_id`; the second bind is ignored when unused.
 fn query_plan(conn: &Connection, sql: &str) -> String {
     let mut stmt = conn
         .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
         .expect("prepare explain");
-    // Both placeholders are bound because `EXPLAIN QUERY PLAN` still requires a complete
-    // parameter set; the values themselves do not steer the plan.
+    // Placeholders are bound because `EXPLAIN QUERY PLAN` still requires a complete parameter
+    // set; the values themselves do not steer the plan.
     let rows: Vec<String> = stmt
         .query_map(params!["chat", Option::<&str>::None], |row| {
             row.get::<_, String>(3)
         })
+        .expect("explain")
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("explain rows");
+    rows.join(" | ")
+}
+
+/// Like [`query_plan`] but for the single-`?1` scoped ref statements.
+fn query_plan_chat(conn: &Connection, sql: &str) -> String {
+    let mut stmt = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .expect("prepare explain");
+    let rows: Vec<String> = stmt
+        .query_map(params!["chat"], |row| row.get::<_, String>(3))
         .expect("explain")
         .collect::<std::result::Result<Vec<_>, _>>()
         .expect("explain rows");
@@ -1194,6 +1213,8 @@ fn an_archive_built_before_the_indexes_existed_picks_them_up_when_it_is_reopened
         "idx_chunks_chat_started",
         "idx_parent_chunks_chat_started",
         "idx_chunk_parent_refs_parent",
+        "idx_messages_chat_id",
+        "idx_chunk_messages_message",
     ] {
         archive
             .connection()
@@ -1204,10 +1225,253 @@ fn an_archive_built_before_the_indexes_existed_picks_them_up_when_it_is_reopened
 
     let reopened = Archive::open(&path).expect("reopen archive");
     assert_no_chunk_table_scans(reopened.connection(), "archive reopened after the indexes existed");
+    assert_no_ref_table_scans(reopened.connection(), "archive reopened after the indexes existed");
     assert_eq!(
         before,
         snapshot(reopened.connection()),
         "adding an index changed the archive's contents"
+    );
+}
+
+/// Tables a scoped ref rebuild must not whole-scan. `chunks_fts` is irrelevant here; the four
+/// statements only touch `reply_edges`, `messages`, `chunk_messages`, and `chunk_parent_refs`.
+const REF_MUST_NOT_SCAN: &[&str] = &["reply_edges", "messages", "chunk_messages", "chunk_parent_refs"];
+
+fn assert_no_ref_table_scans(conn: &Connection, context: &str) {
+    for sql in SCOPED_REF_REBUILD_STATEMENTS {
+        let plan = query_plan_chat(conn, sql);
+        let scanned = scanned_tables(&plan);
+        for table in REF_MUST_NOT_SCAN {
+            assert!(
+                !scanned.contains(table),
+                "{context}: a scoped-ref statement scans {table} instead of using an index\
+                 \nstatement: {sql}\nplan: {plan}"
+            );
+        }
+        // Aliases (`SCAN child USING COVERING INDEX ...`) do not match the bare table names
+        // above, but are still whole-table walks. With the chat_id / message_id indexes every
+        // step of these four statements is a SEARCH; any SCAN means the scope is leaking.
+        let scan_steps: Vec<&str> = plan
+            .split('|')
+            .map(str::trim)
+            .filter(|step| step.starts_with("SCAN "))
+            .collect();
+        assert!(
+            scan_steps.is_empty(),
+            "{context}: a scoped-ref statement still has a SCAN step (archive-size leak)\
+             \nstatement: {sql}\nplan: {plan}\nscan steps: {scan_steps:?}"
+        );
+        // A leading `LIKE 'chat-%'` on child_message_id is the trap the plan called out: it
+        // cannot use the PK and walks every edge. The live statements must not contain it.
+        assert!(
+            !sql.to_ascii_lowercase().contains(" like "),
+            "{context}: scoped-ref statement uses LIKE (not sargable on reply_edges PK):\n{sql}"
+        );
+    }
+}
+
+#[test]
+fn a_scoped_ref_rebuild_addresses_reply_tables_through_indexes_not_scans() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = Archive::open(&dir.path().join("archive.sqlite3")).expect("open archive");
+    archive.sync_messages(&fixture_messages()).expect("sync");
+    rebuild_chunks(&archive).expect("rebuild");
+
+    assert_no_ref_table_scans(archive.connection(), "fresh archive");
+}
+
+/// Two chats with mint-format message ids, cross-chunk replies in each, and a third untouched
+/// chat. Pins: (1) per-chat ref rebuild equals the archive-wide one row-for-row, (2) every edge's
+/// endpoints share a chat_id prefix, (3) rebuilding only one chat leaves the other's edges alone.
+#[test]
+fn a_per_chat_ref_rebuild_matches_a_full_ref_rebuild_and_edges_stay_intra_chat() {
+    let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+        .expect("base timestamp")
+        .with_timezone(&chrono::Utc);
+    // Mint format `{chat_id}-{log_id}` so the prefix invariant is directly assertable. Gaps keep
+    // each sender turn as its own chunk so cross-chunk replies populate chunk_parent_refs.
+    let mut messages = Vec::new();
+    for (chat, nick_a, nick_b) in [("roomA", "보글이", "부리"), ("roomB", "하울", "새미")] {
+        for i in 0..4 {
+            let nick = if i % 2 == 0 { nick_a } else { nick_b };
+            let log = i + 1;
+            let reply = if i == 3 {
+                Some(format!("{chat}-1"))
+            } else {
+                None
+            };
+            messages.push(raw(
+                chat,
+                &format!("{chat}-{log}"),
+                nick,
+                base + chrono::Duration::seconds(i as i64 * 700),
+                &format!("{chat} msg {log}"),
+                reply.as_deref(),
+            ));
+        }
+    }
+    // Untouched third room: must keep its edges when only roomA is ref-rebuilt.
+    messages.push(raw(
+        "roomC",
+        "roomC-1",
+        "민지",
+        base,
+        "조용한 방",
+        None,
+    ));
+    messages.push(raw(
+        "roomC",
+        "roomC-2",
+        "준호",
+        base + chrono::Duration::seconds(60),
+        "답",
+        Some("roomC-1"),
+    ));
+
+    let full_dir = tempfile::tempdir().expect("tempdir");
+    let full = Archive::open(&full_dir.path().join("archive.sqlite3")).expect("open archive");
+    full.sync_messages(&messages).expect("sync full");
+    rebuild_chunks(&full).expect("full rebuild");
+
+    let reply_edges: i64 = full
+        .connection()
+        .query_row("SELECT COUNT(*) FROM reply_edges", [], |row| row.get(0))
+        .expect("count reply_edges");
+    let parent_refs: i64 = full
+        .connection()
+        .query_row("SELECT COUNT(*) FROM chunk_parent_refs", [], |row| row.get(0))
+        .expect("count parent refs");
+    assert!(
+        reply_edges >= 3,
+        "fixture must exercise non-empty reply_edges, got {reply_edges}"
+    );
+    assert!(
+        parent_refs >= 2,
+        "fixture must exercise non-empty chunk_parent_refs, got {parent_refs}"
+    );
+
+    // Every edge's endpoints share a chat prefix (the mint invariant the scope rests on).
+    {
+        let conn = full.connection();
+        let mut stmt = conn
+            .prepare(
+                "SELECT child_message_id, parent_message_id FROM reply_edges
+                 ORDER BY child_message_id",
+            )
+            .expect("prepare edges");
+        let edges: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("edges")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("edge rows");
+        for (child, parent) in &edges {
+            let child_chat = child.split('-').next().expect("child chat prefix");
+            let parent_chat = parent.split('-').next().expect("parent chat prefix");
+            assert_eq!(
+                child_chat, parent_chat,
+                "reply edge crossed chats: {child} -> {parent}"
+            );
+            assert!(
+                child.starts_with(&format!("{child_chat}-"))
+                    && parent.starts_with(&format!("{parent_chat}-")),
+                "edge ids must be mint-format {{chat}}-{{log}}: {child} -> {parent}"
+            );
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.chat_id, p.chat_id FROM chunk_parent_refs r
+                 JOIN chunks c ON c.chunk_id = r.child_chunk_id
+                 JOIN chunks p ON p.chunk_id = r.parent_chunk_id",
+            )
+            .expect("prepare parent refs");
+        let refs: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("refs")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("ref rows");
+        for (child_chat, parent_chat) in &refs {
+            assert_eq!(
+                child_chat, parent_chat,
+                "chunk_parent_ref crossed chats: {child_chat} -> {parent_chat}"
+            );
+        }
+    }
+
+    // Seed a second archive the same way, wipe its ref tables, then rebuild refs per chat only.
+    let scoped_dir = tempfile::tempdir().expect("tempdir");
+    let scoped = Archive::open(&scoped_dir.path().join("archive.sqlite3")).expect("open archive");
+    scoped.sync_messages(&messages).expect("sync scoped");
+    rebuild_chunks(&scoped).expect("seed full so chunks match");
+    scoped
+        .connection()
+        .execute_batch("DELETE FROM reply_edges; DELETE FROM chunk_parent_refs;")
+        .expect("wipe refs");
+    scoped
+        .rebuild_reply_and_parent_refs_for_chats(&["roomA", "roomB", "roomC"])
+        .expect("scoped ref union");
+
+    assert_eq!(
+        snapshot(full.connection()),
+        snapshot(scoped.connection()),
+        "union of per-chat ref rebuilds diverged from the archive-wide ref rebuild"
+    );
+
+    // Rebuild only roomA's refs after corrupting them: roomB/roomC must stay identical to full.
+    scoped
+        .connection()
+        .execute_batch(
+            "DELETE FROM reply_edges WHERE child_message_id IN (
+                SELECT message_id FROM messages WHERE chat_id = 'roomA'
+             );
+             DELETE FROM chunk_parent_refs WHERE child_chunk_id IN (
+                SELECT chunk_id FROM chunks WHERE chat_id = 'roomA'
+             ) OR parent_chunk_id IN (
+                SELECT chunk_id FROM chunks WHERE chat_id = 'roomA'
+             );",
+        )
+        .expect("corrupt roomA refs");
+    let edges_before_b: i64 = scoped
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM reply_edges WHERE child_message_id LIKE 'roomB-%'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count B");
+    assert!(edges_before_b > 0, "roomB edges must survive roomA corruption");
+    scoped
+        .rebuild_reply_and_parent_refs_for_chats(&["roomA"])
+        .expect("rebuild roomA only");
+
+    assert_eq!(
+        snapshot(full.connection()),
+        snapshot(scoped.connection()),
+        "rebuilding refs for one chat diverged from the full archive"
+    );
+    assert_archive_invariants(scoped.connection(), messages.len() as i64);
+
+    // End-to-end: a one-chat append through rebuild_chunks_for_chats must match a full rebuild.
+    let wave = raw(
+        "roomA",
+        "roomA-5",
+        "보글이",
+        base + chrono::Duration::seconds(4 * 700),
+        "꼬리",
+        Some("roomA-1"),
+    );
+    let mut all = messages.clone();
+    all.push(wave.clone());
+    full.sync_messages(std::slice::from_ref(&wave))
+        .expect("sync wave full");
+    rebuild_chunks(&full).expect("full after wave");
+    let report = scoped
+        .sync_messages(std::slice::from_ref(&wave))
+        .expect("sync wave scoped");
+    rebuild_chunks_for_chats(&scoped, settings(), &report.touched_chats).expect("scoped wave");
+    assert_eq!(
+        snapshot(full.connection()),
+        snapshot(scoped.connection()),
+        "scoped chat rebuild (with scoped ref pass) diverged from full rebuild after append"
     );
 }
 
