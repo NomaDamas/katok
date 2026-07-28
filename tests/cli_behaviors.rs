@@ -397,3 +397,135 @@ fn cli_resync_refreshes_existing_message_chat_name() {
         .stdout(predicate::str::contains("\"chat_name\": \"Alice, Bob\""))
         .stdout(predicate::str::contains("\"chat_name\": \"chat-100\"").not());
 }
+
+#[test]
+fn cli_sync_help_documents_touched_flag() {
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args(["sync", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--touched"))
+        .stdout(predicate::str::contains("touched_chats"));
+}
+
+#[test]
+fn cli_sync_json_exposes_touched_chats_only_with_flag() {
+    let fixture = fixture_path("replies.jsonl");
+
+    // Two fresh data dirs so both runs are first-sync and share the same structural counts.
+    let without_dir = tempfile::tempdir().expect("create tempdir");
+    let without = Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            without_dir.path().to_str().expect("utf8 path"),
+            "sync",
+            "--source",
+            "fixture",
+            &fixture,
+            "--json",
+        ])
+        .output()
+        .expect("run sync without --touched");
+    assert!(
+        without.status.success(),
+        "sync without --touched failed: {}",
+        String::from_utf8_lossy(&without.stderr)
+    );
+    let without_json: serde_json::Value =
+        serde_json::from_slice(&without.stdout).expect("parse without --touched");
+    assert!(
+        without_json.get("touched_chats").is_none(),
+        "default JSON must omit touched_chats for consumer byte-compat: {without_json}"
+    );
+
+    let with_dir = tempfile::tempdir().expect("create tempdir");
+    let with = Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            with_dir.path().to_str().expect("utf8 path"),
+            "sync",
+            "--source",
+            "fixture",
+            &fixture,
+            "--json",
+            "--touched",
+        ])
+        .output()
+        .expect("run sync with --touched");
+    assert!(
+        with.status.success(),
+        "sync with --touched failed: {}",
+        String::from_utf8_lossy(&with.stderr)
+    );
+    let with_json: serde_json::Value =
+        serde_json::from_slice(&with.stdout).expect("parse with --touched");
+
+    let touched = with_json
+        .get("touched_chats")
+        .and_then(|v| v.as_array())
+        .expect("touched_chats array present when --touched is set");
+    assert_eq!(touched.len(), 1, "replies fixture has one chat: {touched:?}");
+    let entry = &touched[0];
+    assert_eq!(entry["chat_id"], "chat-group-1");
+    assert_eq!(entry["earliest_changed_message_id"], "m1");
+    let ts = entry["earliest_changed_timestamp"]
+        .as_str()
+        .expect("timestamp string");
+    assert!(
+        ts.starts_with("2026-01-01T09:00:00"),
+        "earliest change is the first fixture message, got {ts}"
+    );
+    assert!(
+        entry.get("earliest_changed_timestamp").is_some()
+            && entry.get("earliest_changed_message_id").is_some()
+            && entry.get("chat_id").is_some(),
+        "consumer contract fields present"
+    );
+
+    // Flag-on minus touched_chats equals flag-off once wall-clock timings are stripped.
+    let mut with_stripped = with_json.clone();
+    with_stripped
+        .as_object_mut()
+        .expect("object")
+        .remove("touched_chats");
+    with_stripped
+        .as_object_mut()
+        .expect("object")
+        .remove("timings_ms");
+    let mut without_stripped = without_json.clone();
+    without_stripped
+        .as_object_mut()
+        .expect("object")
+        .remove("timings_ms");
+    assert_eq!(
+        without_stripped, with_stripped,
+        "flag-off and flag-on must share the same non-opt-in fields"
+    );
+
+    // Quiet re-sync with --touched still emits the key (empty array), so consumers can rely on it.
+    let quiet = Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            with_dir.path().to_str().expect("utf8 path"),
+            "sync",
+            "--source",
+            "fixture",
+            &fixture,
+            "--json",
+            "--touched",
+        ])
+        .output()
+        .expect("run quiet re-sync with --touched");
+    assert!(quiet.status.success());
+    let quiet_json: serde_json::Value =
+        serde_json::from_slice(&quiet.stdout).expect("parse quiet re-sync");
+    assert_eq!(
+        quiet_json["touched_chats"],
+        serde_json::json!([]),
+        "quiet re-sync must still expose touched_chats when flagged"
+    );
+}
