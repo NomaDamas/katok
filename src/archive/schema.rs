@@ -83,7 +83,22 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             PRIMARY KEY(child_message_id, parent_message_id)
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
-            USING fts5(chunk_id UNINDEXED, text);",
+            USING fts5(chunk_id UNINDEXED, text);
+
+        -- A scoped rebuild addresses chunk rows as `(chat_id, started_at floor)`: the backward
+        -- walk in `tail_rebuild_start` and every tail delete in `delete_chat_chunks`. Without
+        -- these the archive has no index but the primary keys, so each of those statements scans
+        -- the whole table and the cost of touching one room follows the size of the archive.
+        -- `IF NOT EXISTS` lets an existing archive pick them up on the next open; no migration
+        -- framework is involved because an index carries no data to convert.
+        CREATE INDEX IF NOT EXISTS idx_chunks_chat_started
+            ON chunks(chat_id, started_at);
+        CREATE INDEX IF NOT EXISTS idx_parent_chunks_chat_started
+            ON parent_chunks(chat_id, started_at);
+        -- `chunk_parent_refs` has a primary key on `(child_chunk_id, parent_chunk_id)`, which
+        -- serves the child half of the tail delete's OR but leaves the parent half scanning.
+        CREATE INDEX IF NOT EXISTS idx_chunk_parent_refs_parent
+            ON chunk_parent_refs(parent_chunk_id);",
     )
     .map_err(Error::Sql)?;
 

@@ -7,6 +7,39 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 
+/// The statements [`Archive::replace_chunk_tail`] issues to drop a chat's chunk tail, in order.
+///
+/// Bound as `(?1 = chat_id, ?2 = the `started_at` floor or NULL)`. They live here rather than
+/// inline so the query-plan test asserts against the text that actually runs; a copy in the test
+/// would let a rewrite reintroduce a whole-table scan without anything failing.
+///
+/// The floor reads `started_at >= COALESCE(?2, '')` rather than `?2 IS NULL OR started_at >= ?2`.
+/// The two select the same rows — `started_at` is non-empty RFC3339 text, so every row of the
+/// chat compares `>= ''` — but only the first is a range SQLite can drive from
+/// `idx_chunks_chat_started`. The `OR` form makes the whole term unusable as a bound, which left
+/// each delete walking every chunk of the room even once the index existed, putting room size
+/// back into a cost the tail scope is meant to bound.
+pub const DELETE_CHAT_CHUNKS_STATEMENTS: [&str; 6] = [
+    "DELETE FROM chunks_fts
+     WHERE chunk_id IN (SELECT chunk_id FROM chunks
+        WHERE chat_id = ?1 AND started_at >= COALESCE(?2, ''))",
+    "DELETE FROM chunk_messages
+     WHERE chunk_id IN (SELECT chunk_id FROM chunks
+        WHERE chat_id = ?1 AND started_at >= COALESCE(?2, ''))",
+    "DELETE FROM chunk_parent_refs
+     WHERE child_chunk_id IN (SELECT chunk_id FROM chunks
+            WHERE chat_id = ?1 AND started_at >= COALESCE(?2, ''))
+        OR parent_chunk_id IN (SELECT chunk_id FROM chunks
+            WHERE chat_id = ?1 AND started_at >= COALESCE(?2, ''))",
+    "DELETE FROM parent_chunk_children
+     WHERE parent_id IN (SELECT parent_id FROM parent_chunks
+        WHERE chat_id = ?1 AND started_at >= COALESCE(?2, ''))",
+    "DELETE FROM parent_chunks
+     WHERE chat_id = ?1 AND started_at >= COALESCE(?2, '')",
+    "DELETE FROM chunks
+     WHERE chat_id = ?1 AND started_at >= COALESCE(?2, '')",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MessageChange {
     Inserted,
@@ -104,27 +137,9 @@ impl Archive {
     /// comparison needs no message-id tiebreak (docs/incremental-chunking-tail-scope.md).
     ///
     /// The FTS rows go first: they are located through `chunks`, which the last statement removes.
+    /// The statement texts and how they are indexed are in [`DELETE_CHAT_CHUNKS_STATEMENTS`].
     fn delete_chat_chunks(&self, chat_id: &str, from_started_at: Option<&str>) -> Result<()> {
-        for sql in [
-            "DELETE FROM chunks_fts
-             WHERE chunk_id IN (SELECT chunk_id FROM chunks
-                WHERE chat_id = ?1 AND (?2 IS NULL OR started_at >= ?2))",
-            "DELETE FROM chunk_messages
-             WHERE chunk_id IN (SELECT chunk_id FROM chunks
-                WHERE chat_id = ?1 AND (?2 IS NULL OR started_at >= ?2))",
-            "DELETE FROM chunk_parent_refs
-             WHERE child_chunk_id IN (SELECT chunk_id FROM chunks
-                    WHERE chat_id = ?1 AND (?2 IS NULL OR started_at >= ?2))
-                OR parent_chunk_id IN (SELECT chunk_id FROM chunks
-                    WHERE chat_id = ?1 AND (?2 IS NULL OR started_at >= ?2))",
-            "DELETE FROM parent_chunk_children
-             WHERE parent_id IN (SELECT parent_id FROM parent_chunks
-                WHERE chat_id = ?1 AND (?2 IS NULL OR started_at >= ?2))",
-            "DELETE FROM parent_chunks
-             WHERE chat_id = ?1 AND (?2 IS NULL OR started_at >= ?2)",
-            "DELETE FROM chunks
-             WHERE chat_id = ?1 AND (?2 IS NULL OR started_at >= ?2)",
-        ] {
+        for sql in DELETE_CHAT_CHUNKS_STATEMENTS {
             self.conn
                 .execute(sql, params![chat_id, from_started_at])
                 .map_err(Error::Sql)?;

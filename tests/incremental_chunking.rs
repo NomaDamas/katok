@@ -4,7 +4,7 @@
 //! archive it leaves behind is indistinguishable from the one the slow path built.
 
 use katok::{
-    archive::Archive,
+    archive::{Archive, DELETE_CHAT_CHUNKS_STATEMENTS, TAIL_REBUILD_START_QUERY},
     chunking::{
         rebuild_chunks, rebuild_chunks_for_chats, rebuild_chunks_with_settings, ChunkSettings,
         CHUNKER_VERSION,
@@ -1082,4 +1082,200 @@ fn a_large_single_room_tail_matches_a_full_rebuild_and_cost_tracks_new_messages(
          ref_only_ms={ref_only_ms} speedup={:.1}x",
         whole_seed_ms as f64 / large_scoped_ms.max(1) as f64
     );
+}
+
+/// The `EXPLAIN QUERY PLAN` step for one statement, joined into one line.
+fn query_plan(conn: &Connection, sql: &str) -> String {
+    let mut stmt = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .expect("prepare explain");
+    // Both placeholders are bound because `EXPLAIN QUERY PLAN` still requires a complete
+    // parameter set; the values themselves do not steer the plan.
+    let rows: Vec<String> = stmt
+        .query_map(params!["chat", Option::<&str>::None], |row| {
+            row.get::<_, String>(3)
+        })
+        .expect("explain")
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("explain rows");
+    rows.join(" | ")
+}
+
+/// Every statement a scoped rebuild issues against the chunk tables, taken from the source the
+/// rebuild itself runs — not retyped here, or a rewrite could reintroduce a whole-table scan with
+/// the test still passing against its own stale copy.
+fn scoped_chunk_statements() -> Vec<&'static str> {
+    std::iter::once(TAIL_REBUILD_START_QUERY)
+        .chain(DELETE_CHAT_CHUNKS_STATEMENTS)
+        .collect()
+}
+
+/// Tables whose whole-table scan is what the chunk indexes exist to remove.
+///
+/// `chunks_fts` is deliberately absent: it is an fts5 virtual table whose `chunk_id` column is
+/// UNINDEXED, so deleting by `chunk_id` scans it no matter what indexes the other tables carry.
+/// Removing that scan means changing the FTS content model, not adding an index.
+const MUST_NOT_SCAN: &[&str] = &["chunks", "parent_chunks", "chunk_parent_refs"];
+
+/// The tables a plan reports a whole-table `SCAN` of.
+///
+/// Compared as whole names rather than by substring, or `SCAN chunks_fts` would read as a scan
+/// of `chunks` and the assertion would fire on a plan that is exactly what we want.
+fn scanned_tables(plan: &str) -> Vec<&str> {
+    plan.split("SCAN ")
+        .skip(1)
+        .filter_map(|rest| rest.split([' ', '|']).next())
+        .collect()
+}
+
+/// The indexes whose whole point is to carry the `started_at` floor as well as the chat.
+const TIME_ORDERED_INDEXES: &[&str] = &["idx_chunks_chat_started", "idx_parent_chunks_chat_started"];
+
+/// Whether every plan step that reaches for a time-ordered index also bounds `started_at`.
+///
+/// Using the index on `chat_id` alone is not enough: that still walks every chunk the room has
+/// ever had, which is the room-size term the tail scope exists to remove. SQLite reports the
+/// bound it actually took in the parenthesised constraint list, so the plan is where the
+/// difference shows — a `SCAN` check alone passes either way.
+fn steps_missing_the_started_at_bound(plan: &str) -> Vec<&str> {
+    plan.split('|')
+        .map(str::trim)
+        .filter(|step| TIME_ORDERED_INDEXES.iter().any(|idx| step.contains(idx)))
+        .filter(|step| !step.contains("started_at"))
+        .collect()
+}
+
+fn assert_no_chunk_table_scans(conn: &Connection, context: &str) {
+    for sql in scoped_chunk_statements() {
+        let plan = query_plan(conn, sql);
+        let scanned = scanned_tables(&plan);
+        for table in MUST_NOT_SCAN {
+            assert!(
+                !scanned.contains(table),
+                "{context}: a scoped-rebuild statement scans {table} instead of using an index\
+                 \nstatement: {sql}\nplan: {plan}"
+            );
+        }
+        let unbounded = steps_missing_the_started_at_bound(&plan);
+        assert!(
+            unbounded.is_empty(),
+            "{context}: a scoped-rebuild statement uses a time-ordered index on chat_id alone, \
+             so it still walks the whole room: {unbounded:?}\nstatement: {sql}\nplan: {plan}"
+        );
+    }
+}
+
+#[test]
+fn a_scoped_rebuild_addresses_the_chunk_tables_through_indexes_not_scans() {
+    // Without these indexes every statement above walks the whole table, so touching one room
+    // costs a pass over the entire archive. The plans, not a stopwatch, are what pin that: a
+    // timing on a fixture this size would prove nothing.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = Archive::open(&dir.path().join("archive.sqlite3")).expect("open archive");
+    archive.sync_messages(&fixture_messages()).expect("sync");
+    rebuild_chunks(&archive).expect("rebuild");
+
+    assert_no_chunk_table_scans(archive.connection(), "fresh archive");
+}
+
+#[test]
+fn an_archive_built_before_the_indexes_existed_picks_them_up_when_it_is_reopened() {
+    // The indexes ship as `CREATE INDEX IF NOT EXISTS` in `migrate`, which is the whole migration
+    // story for them. This pins that an archive that predates them is not left behind: dropping
+    // them models that archive, and reopening must restore both the indexes and the plans.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("archive.sqlite3");
+    let archive = Archive::open(&path).expect("open archive");
+    archive.sync_messages(&fixture_messages()).expect("sync");
+    rebuild_chunks(&archive).expect("rebuild");
+    let before = snapshot(archive.connection());
+
+    for index in [
+        "idx_chunks_chat_started",
+        "idx_parent_chunks_chat_started",
+        "idx_chunk_parent_refs_parent",
+    ] {
+        archive
+            .connection()
+            .execute_batch(&format!("DROP INDEX {index};"))
+            .expect("drop index");
+    }
+    drop(archive);
+
+    let reopened = Archive::open(&path).expect("reopen archive");
+    assert_no_chunk_table_scans(reopened.connection(), "archive reopened after the indexes existed");
+    assert_eq!(
+        before,
+        snapshot(reopened.connection()),
+        "adding an index changed the archive's contents"
+    );
+}
+
+#[test]
+fn a_null_floor_deletes_the_same_chunk_rows_the_or_form_did() {
+    // `delete_chat_chunks` states the floor as `started_at >= COALESCE(?2, '')` so SQLite can
+    // drive it from the index; the `?2 IS NULL OR started_at >= ?2` form it replaced could not be.
+    // The rewrite is only safe if the two select identical rows, which holds because `started_at`
+    // is non-empty RFC3339 text. This pins that on real rows rather than on the argument.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = Archive::open(&dir.path().join("archive.sqlite3")).expect("open archive");
+    archive.sync_messages(&fixture_messages()).expect("sync");
+    rebuild_chunks(&archive).expect("rebuild");
+
+    let conn = archive.connection();
+    let chats: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT chat_id FROM chunks ORDER BY chat_id")
+            .expect("prepare chats");
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("chats")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("chat rows");
+        rows
+    };
+    assert!(!chats.is_empty(), "fixture must produce chunks");
+
+    // Every floor the scoped path can pass: the whole-chat `None`, and each stored boundary.
+    let mut floors: Vec<Option<String>> = vec![None];
+    {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT started_at FROM chunks ORDER BY started_at")
+            .expect("prepare floors");
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("floors")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("floor rows");
+        floors.extend(rows.into_iter().map(Some));
+    }
+
+    for (table, column, floor_column) in [
+        ("chunks", "chunk_id", "started_at"),
+        ("parent_chunks", "parent_id", "started_at"),
+    ] {
+        for chat_id in &chats {
+            for floor in &floors {
+                let select = |predicate: &str| -> Vec<String> {
+                    let sql = format!(
+                        "SELECT {column} FROM {table}
+                         WHERE chat_id = ?1 AND {predicate} ORDER BY {column}"
+                    );
+                    let mut stmt = conn.prepare(&sql).expect("prepare select");
+                    stmt.query_map(params![chat_id, floor.as_deref()], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .expect("select")
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .expect("select rows")
+                };
+                assert_eq!(
+                    select(&format!("(?2 IS NULL OR {floor_column} >= ?2)")),
+                    select(&format!("{floor_column} >= COALESCE(?2, '')")),
+                    "{table}: the sargable floor selected different rows than the OR form \
+                     (chat_id={chat_id}, floor={floor:?})"
+                );
+            }
+        }
+    }
 }

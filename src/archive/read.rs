@@ -5,6 +5,16 @@ use crate::{
 };
 use rusqlite::{params, OptionalExtension};
 
+/// The backward walk over one chat's chunks that [`Archive::tail_rebuild_start`] drives.
+///
+/// Bound as `(?1 = chat_id, ?2 = the earliest changed timestamp)`. Lives here rather than inline
+/// so the query-plan test asserts against the text that actually runs. `idx_chunks_chat_started`
+/// serves all three parts of it — the equality, the range, and the descending order — so the walk
+/// visits the chat's newest chunks and stops, instead of sorting the whole table to find them.
+pub const TAIL_REBUILD_START_QUERY: &str = "SELECT started_at, ended_at FROM chunks
+     WHERE chat_id = ?1 AND started_at < ?2
+     ORDER BY started_at DESC";
+
 impl Archive {
     pub fn chunks_for_chat(&self, chat_id: &str) -> Result<Vec<ChunkSummary>> {
         let mut stmt = self
@@ -194,11 +204,7 @@ impl Archive {
     ) -> Result<Option<String>> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT started_at, ended_at FROM chunks
-                 WHERE chat_id = ?1 AND started_at < ?2
-                 ORDER BY started_at DESC",
-            )
+            .prepare(TAIL_REBUILD_START_QUERY)
             .map_err(Error::Sql)?;
         let mut rows = stmt
             .query(params![chat_id, earliest_changed_timestamp])
