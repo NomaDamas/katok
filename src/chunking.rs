@@ -59,8 +59,9 @@ pub fn rebuild_chunks_with_settings(archive: &Archive, settings: ChunkSettings) 
 /// `cutting_at_the_last_parent_window_reproduces_the_full_rebuild_tail`.
 ///
 /// A chat whose earliest change lands before any interior boundary (empty timestamp forces this)
-/// is rebuilt whole. Reply and cross-chunk parent references join across chats, so they are
-/// rebuilt once after every touched chat is replaced.
+/// is rebuilt whole. Reply and cross-chunk parent references are chat-local (see
+/// `docs/incremental-chunking-tail-scope.md`), so they are rebuilt only for the touched chats
+/// after every touched chat's tail is replaced — not for the whole archive.
 pub fn rebuild_chunks_for_chats(
     archive: &Archive,
     settings: ChunkSettings,
@@ -76,7 +77,8 @@ pub fn rebuild_chunks_for_chats(
         let parents = build_parent_windows(&drafts)?;
         archive.replace_chunk_tail(&chat.chat_id, from.as_deref(), &drafts, &parents)?;
     }
-    archive.rebuild_reply_and_parent_refs()?;
+    let chat_ids: Vec<&str> = touched.iter().map(|c| c.chat_id.as_str()).collect();
+    archive.rebuild_reply_and_parent_refs_for_chats(&chat_ids)?;
     archive.chunk_count()
 }
 

@@ -42,7 +42,7 @@ A mid-history in-place update (for example a `sender_nickname` change on an old 
 
 The rule needs `e` per touched chat, which `sync_messages` does not report yet: it currently reports only `touched_chats` (chat ids), not where in each chat the change landed. The implementation step will extend the sync report to also carry, per touched chat, the smallest changed key `e` (its earliest inserted-or-updated message's `(timestamp, message_id)`), and `rebuild_chunks_for_chats` will resolve `P` from the stored chunk gaps of that chat. The existing full-rebuild triggers (first sync, gap-settings change, chunker-version bump) are unaffected and still take the full path.
 
-`rebuild_parent_refs` (the reply-edge and cross-chunk reference pass) still scans the whole archive. Step-1 measurements put that within the small-room floor (about 220ms) while the chunking loop dominated the large-room cost (about 4.95s), so tail-scoping the chunking loop captures the win; scoping the reference pass is a separate, later concern and is out of scope here.
+`rebuild_parent_refs` (the reply-edge and cross-chunk reference pass) still scans the whole archive. Step-1 measurements put that within the small-room floor (about 220ms) while the chunking loop dominated the large-room cost (about 4.95s), so tail-scoping the chunking loop captures the win; scoping the reference pass is handled separately — the fact that it *can* be scoped, and the rule for doing so, are settled in "The reply/parent-ref pass is chat-local too" below.
 
 ### Where the implementation actually cuts
 
@@ -93,6 +93,138 @@ Speedup scoped vs whole-chat ≈ 25x. Of the 5.2s scoped floor, **5.1s is the
 archive-wide ref pass** — the re-chunk of the last burst is negligible. That is
 why residual scales with archive size even after tail scope.
 
+## The reply/parent-ref pass is chat-local too (step-2 determination)
+
+The residual section above leaves the archive-wide ref pass as the dominant remaining cost. This section settles the fact the scoping rests on: **can `rebuild_parent_refs` be split per chat and still equal the full-archive rebuild?** The answer is yes, and not as a soft domain assumption ("KakaoTalk replies stay in one room") but as a hard construction invariant that survives even malformed input.
+
+### What the pass writes
+
+`rebuild_parent_refs` (`src/archive/write.rs:415-463`) issues four statements:
+
+1. `DELETE FROM reply_edges` (`write.rs:417`) — wipe.
+2. Re-derive `reply_edges(child_message_id, parent_message_id)` from `SELECT message_id, reply_to_message_id FROM messages WHERE reply_to_message_id IS NOT NULL` (`write.rs:421-428`). Each edge is copied verbatim from **one** child message row, so both columns carry that row's own ids.
+3. Re-derive `chunk_parent_refs(child_chunk_id, parent_chunk_id)` by `JOIN chunk_messages parent ON parent.message_id = child_msg.reply_to_message_id` (`write.rs:429-440`). The parent chunk is located purely by matching `child_msg.reply_to_message_id` against some `chunk_messages.message_id`.
+4. `UPDATE reply_edges` to fill `child_chunk_id`/`parent_chunk_id` by looking up `chunk_messages` by message id (`write.rs:441-461`).
+
+Statements 3 and 4 join on `message_id` alone; they do **not** carry a `chat_id` term. So whether an edge can cross a chat boundary reduces to one question: **can a message's `reply_to_message_id` ever name a message in a different chat?**
+
+### Why it cannot cross a chat — two independent guarantees
+
+- **G1, ids are chat-namespaced.** Every `message_id` is minted as `format!("{chat_id}-{log_id}")` (`src/kakao/reader.rs:446`). The chat id is a literal string prefix, so two distinct chats produce disjoint `message_id` spaces (a KakaoTalk `chatId` is a global room id, so distinct rooms have distinct prefixes; the dedup that unions multiple databases is keyed on this same `message_id`, `reader.rs:463-529`). The codebase already treats this as a standing invariant: `strip_chat_prefix` documents "A message id is `<chat_id>-<log_id>`" (`src/transcript.rs:130-137`).
+
+- **G2, a reply reference is stamped with the *child's own* chat.** `reply_to_message_id` is `reply_parent_log_id(supplement).filter(|p| *p != log_id).map(|parent| format!("{chat_id}-{parent}"))` (`reader.rs:428-430`), where `chat_id` is the child message's own chat. The parent's raw `log_id` is read out of the child's `supplement` JSON, but the prefix that turns it into a `message_id` is taken from the child. So `reply_to_message_id` always begins with the child's chat prefix.
+
+Compose G1 and G2: the join `parent.message_id = child_msg.reply_to_message_id` (`write.rs:435`) can only bind a `chunk_messages` row whose `message_id` shares the child's chat prefix — that is, a row of the child's own chat. Statement 2 needs no join at all: it copies `message_id` (prefix `C` by G1) and `reply_to_message_id` (prefix `C` by G2) from the same child row, so both endpoints share chat `C` before any chunk resolution. Every `reply_edges` and `chunk_parent_refs` row therefore has **both endpoints in a single chat**, and that chat is the child message's chat.
+
+The malformed case is neutralized rather than merely improbable: if a `supplement` named a `log_id` that only exists in another room, `reader.rs` still stamps it with the child's chat (`{child_chat}-{foreign_log}`), producing a string that matches nothing in the child's chat. The edge resolves to `unresolved_reason = 'parent_not_in_archive'` (`write.rs:452-458`); it never becomes a cross-chat edge. There is no crossing path to design around — the mint forecloses it.
+
+### The one boundary condition to name: scope by `chat_id`, not by account
+
+The ref joins also drop `account_hash`, though the `messages` primary key is `(account_hash, chat_id, message_id)` (`src/archive/schema.rs:18`). If the same room (same `chat_id`) were ever ingested under two `account_hash` values, both account rows still share the `chat_id` prefix, so (a) their edges remain intra-chat and (b) they belong to the same scope unit. `sync_messages` already builds the touched set keyed on `chat_id` alone (`write.rs:63-118`), which is the correct granularity. The rule the next step must honor is: **the scope unit is `chat_id`** — never split a room by account, or a multi-account room would rebuild only half its edges.
+
+### The scoping rule that follows
+
+Because every edge is owned by exactly one `chat_id`, the archive-wide pass equals the union of independent per-chat passes. To rebuild refs for only the touched chats and match a full rebuild:
+
+- **`reply_edges`** — delete the touched chats' edges and re-derive only those. An edge belongs to chat `C` iff its `child_message_id` has prefix `C-` (equivalently, iff the child message's `chat_id = C`). Scoped delete: remove rows whose `child_message_id` resolves to a touched chat; scoped insert: re-run statement 2 with `AND chat_id IN (touched)`. Untouched chats' edges are provably unchanged because their child messages did not change this sync.
+- **`chunk_parent_refs`** — the touched chats' rows are *already* removed by the tail delete: `delete_chat_chunks` drops `chunk_parent_refs` where the child **or** parent chunk is in the rebuilt tail (`write.rs:29-33`), and since both endpoints are intra-chat that OR only ever removes the touched chat's own refs. Scoped insert: re-run statement 3 with `AND child_msg.chat_id IN (touched)`.
+- **chunk-id resolution (statements 3 and 4)** reads only the touched chats' `chunk_messages`, because the matched parent is in the same chat — its chunks were rebuilt in the same chat's tail or sit in that chat's frozen prefix. No untouched chat's rows are read.
+
+### The equivalence condition, stated for a test to pin
+
+> Scoping the ref pass to the touched chats equals the full-archive rebuild **iff** every `reply_edges` and `chunk_parent_refs` row has both endpoints in a single chat and that chat is the touched unit. This holds because `message_id = {chat_id}-{log_id}` (`reader.rs:446`) and `reply_to_message_id = {child_chat_id}-{parent_log_id}` (`reader.rs:428-430`) stamp both endpoints with the same `chat_id`, and the touched unit is `chat_id` (`write.rs:63-118`).
+
+The condition is falsifiable and directly testable. It breaks only if a future change (a) mints `message_id` or `reply_to_message_id` without the `chat_id` prefix, or (b) makes the ref join match across the prefix (for example, stripping the prefix and joining on bare `log_id`). Step 3 pins it by extending the existing seven-table full-vs-scoped equivalence (see below) to assert, on a fixture with **non-empty** `reply_edges` and `chunk_parent_refs`, that a per-chat ref rebuild is row-for-row identical to the archive-wide one, and that every produced edge's two endpoints share a `chat_id` prefix. A test that flips either invariant — a cross-chat reply reference, or a join that ignores the prefix — must make that equivalence fail.
+
+## The FTS tail delete is a rowid seek, not a table walk (step-4 determination)
+
+With the `chunks` indexes in place, the largest single term left in a scoped rebuild was one statement: the tail delete against `chunks_fts`. It read
+
+```sql
+DELETE FROM chunks_fts
+ WHERE chunk_id IN (SELECT chunk_id FROM chunks
+    WHERE chat_id = ?1 AND started_at >= COALESCE(?2, ''))
+```
+
+and cost ~41ms warm on the real archive while removing four rows.
+
+### Why no index could fix it
+
+`chunks_fts` is `fts5(chunk_id UNINDEXED, text)`. `UNINDEXED` means fts5 keeps the column as stored content only and offers SQLite no way to constrain on it, and a virtual table cannot carry an ordinary index. SQLite's only remaining plan is to ask fts5 for every row of the table and apply the `IN` itself, so the statement's cost follows **archive size**. The plan says so directly:
+
+```
+SCAN chunks_fts VIRTUAL TABLE INDEX 0:
+```
+
+The `idxStr` after the colon is what fts5's `xBestIndex` accepted. Empty means it accepted nothing.
+
+### What replaced it
+
+The fix is not a different content model but a different handle. `chunks_fts.rowid` **is** the chunk's `chunks.rowid`: `insert_chunk` writes the fts row as `INSERT INTO chunks_fts(rowid, chunk_id, text) VALUES ((SELECT rowid FROM chunks WHERE chunk_id = ?1), ?1, ?2)` (`src/archive/write.rs`), and `bm25_search` already joins the two tables on it (`src/search.rs`, `JOIN chunks c ON c.rowid = chunks_fts.rowid`). The correspondence is therefore load-bearing in the read path already; the delete just starts using it:
+
+```sql
+DELETE FROM chunks_fts
+ WHERE rowid IN (SELECT rowid FROM chunks
+    WHERE chat_id = ?1 AND started_at >= COALESCE(?2, ''))
+```
+
+`rowid` is fts5's docid, the one column it does accept a constraint on. The plan picks up the pushed-down constraint, and the subquery becomes covering:
+
+```
+SCAN chunks_fts VIRTUAL TABLE INDEX 0:=
+LIST SUBQUERY 1
+  SEARCH chunks USING COVERING INDEX idx_chunks_chat_started (chat_id=? AND started_at>?)
+```
+
+SQLite still prints `SCAN` for any fts5 step — it does for a single-row seek too — so the scan-by-name check the other tables use says nothing here. The `=` in the `idxStr` is the evidence, and it is what the test asserts.
+
+### Measured, at two archive sizes
+
+Real-archive copy (405k messages / 262k chunks), largest room, floor set so exactly four chunks are deleted, warm, `BEGIN`/`ROLLBACK` per run:
+
+| archive `chunks_fts` rows | `chunk_id` form | `rowid` form |
+|---|---|---|
+| 262,271 | 43 / 40 / 41 ms | 0 / 1 / 0 ms |
+| 193,857 (other rooms halved) | 28 / 27 / 26 ms | 0 / 1 / 0 ms |
+
+The old form tracks archive size (74% of the rows, 66% of the time); the new one does not move. Decomposed on the same copy, the surviving cost of the new statement is the delete itself (~1ms for four rows) — the archive-proportional term is gone, not merely reduced.
+
+### The invariant this now rests on
+
+> Every `chunks_fts` row sits on the `rowid` its chunk has in `chunks`.
+
+Written by `insert_chunk`, read by `bm25_search`, and now also the address the tail delete deletes by. It is stated on the table in `src/archive/schema.rs` and pinned by `assert_archive_invariants`, which fails if any fts row's `(rowid, chunk_id)` does not match a `chunks` row — a count-only check would pass an archive where the two had drifted and the delete was removing the wrong rows.
+
+## The tail read of `messages` is a chat seek, not a table walk (step-5 determination)
+
+The scoped rebuild reads the tail it recomputes through `raw_messages_for_chat_since`. Its filter reaches `messages` by `chat_id`, which is not a primary-key prefix (`messages` is `(account_hash, chat_id, message_id)`), so with no messages index the read scans the whole archive — the same defect class as the chunk tables, one table over. It read
+
+```sql
+SELECT ... FROM messages
+ WHERE chat_id = ?1 AND (?2 IS NULL OR timestamp >= ?2)
+ ORDER BY timestamp, message_id
+```
+
+Two things were wrong, and an index alone fixes only one. A bare `(chat_id)` index (which the step-3 ref pass had already added) turns the `SCAN` into a `SEARCH`, but leaves a `USE TEMP B-TREE FOR ORDER BY` and re-checks the `timestamp` floor row by row, because `?2 IS NULL OR timestamp >= ?2` is not sargable — SQLite cannot carry an `OR` over a bind into an index range.
+
+### What replaced it
+
+The floor is rewritten to `timestamp >= COALESCE(?2, '')`, exactly as the chunk statements were. The two forms select the same rows — every stored `timestamp` is text, so a NULL floor collapsed to `''` still admits all of them — but only the `COALESCE` form is sargable. Paired with a single index on `(chat_id, timestamp, message_id)`, the read becomes
+
+```
+SEARCH messages USING INDEX idx_messages_chat_timestamp (chat_id=? AND timestamp>?)
+```
+
+with no scan, no temp b-tree (the index order is the `ORDER BY`), and the floor pushed into the range.
+
+### One index, not two
+
+`idx_messages_chat_timestamp(chat_id, timestamp, message_id)` replaces the step-3 `idx_messages_chat_id(chat_id)` rather than sitting beside it. Its `chat_id` prefix serves the ref pass's membership subquery `SELECT message_id FROM messages WHERE chat_id = ?1` (covering, since `message_id` is the only column selected), so the narrow index carries no query the wide one does not. Keeping both would only add an index for sync to maintain on every message insert — a write cost this plan exists to shrink — so the wider index is the single handle for reaching a chat's rows. It is `idx_messages_chat_timestamp` that the reopen test now lists, and the step-3 ref-scan test still passes on its prefix.
+
+### The evidence this rests on
+
+Since the step-3 index had already removed the raw `SCAN`, a scan-by-name check alone would pass without the wider index. The regression instead pins the whole win — no `SCAN messages`, no temp b-tree, and the `timestamp` bound present in the search's constraint list — and gives the bound check teeth by pinning that the `OR` form it replaced pushes only `chat_id`. It then drops `idx_messages_chat_timestamp` and asserts the read falls back to a `SCAN`, so the index is shown to be load-bearing for this exact query independently of the ref pass that first introduced a messages index.
+
 ## The tests that pin the rule
 
 `tests/incremental_chunking.rs` pins both the cut rule and the equivalence surface:
@@ -116,6 +248,23 @@ why residual scales with archive size even after tail scope.
   100k-message single room (override with `KATOK_LARGE_CHAT_N`); tail equals a full
   rebuild of the same tail messages; frozen prefix untouched; scoped cost does not
   track room size.
+- `a_scoped_rebuild_seeks_fts_rows_by_rowid_instead_of_walking_the_whole_table` —
+  the fts tail delete pushes a rowid constraint into fts5 (`idxStr` carries `=`),
+  and the `chunk_id` form it replaced is pinned as pushing nothing down, so the
+  assertion is shown to distinguish the two rather than to accept anything fts5
+  prints.
+- `bm25_search_after_a_scoped_tail_rebuild_returns_what_a_full_rebuild_would` —
+  the real search API over an archive whose tail was replaced in place; a delete
+  that removed the wrong fts rows shows up as a stale hit, a missing hit, or a
+  wrong `chunk_id`.
+- `raw_messages_for_chat_since_seeks_one_chat_tail_without_scanning_messages` —
+  the tail read's plan has no `SCAN messages`, no temp b-tree, and the `timestamp`
+  floor pushed into the index; the `OR` form it replaced is pinned as pushing only
+  `chat_id`, and dropping `idx_messages_chat_timestamp` is pinned as forcing a
+  `SCAN`, so the index is shown load-bearing for this read.
+- `the_sargable_floor_selects_the_same_rows_as_the_or_form` — the `COALESCE(?2, '')`
+  floor returns exactly the rows `?2 IS NULL OR timestamp >= ?2` did, on real data,
+  for a NULL floor, a mid-chat floor, and one past the end.
 
 If a future edit makes a boundary non-local, or makes a closed window depend on
 later chunks, those equivalences break and the tests fail.
