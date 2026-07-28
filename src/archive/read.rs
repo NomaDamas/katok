@@ -116,6 +116,64 @@ impl Archive {
         Ok(rows)
     }
 
+    /// Same rows and same order as [`Archive::raw_messages`], restricted to `chat_ids`.
+    ///
+    /// The ordering must stay identical: chunk boundaries are decided by walking messages in
+    /// this order, so a different order would produce different chunks for the same data.
+    pub fn raw_messages_for_chats(&self, chat_ids: &[String]) -> Result<Vec<StoredMessage>> {
+        if chat_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", chat_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT account_hash, chat_id, chat_name, chat_type, message_id,
+                    sender_nickname, timestamp, text, message_type
+             FROM messages WHERE chat_id IN ({placeholders})
+             ORDER BY chat_id, timestamp, message_id"
+            ))
+            .map_err(Error::Sql)?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params_from_iter(chat_ids),
+                StoredMessage::from_row,
+            )
+            .map_err(Error::Sql)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Sql)?;
+        Ok(rows)
+    }
+
+    /// Messages of one chat in send order, optionally from `since` (RFC3339) onward.
+    ///
+    /// Timestamps are stored as RFC3339 text, which sorts and compares lexicographically in the
+    /// same order as the instants it encodes, so the range filter needs no conversion.
+    pub fn messages_for_transcript(
+        &self,
+        chat_id: &str,
+        since: Option<&str>,
+    ) -> Result<Vec<StoredMessage>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT account_hash, chat_id, chat_name, chat_type, message_id,
+                    sender_nickname, timestamp, text, message_type
+             FROM messages
+             WHERE chat_id = ?1 AND (?2 IS NULL OR timestamp >= ?2)
+             ORDER BY timestamp, message_id",
+            )
+            .map_err(Error::Sql)?;
+        let rows = stmt
+            .query_map(params![chat_id, since], StoredMessage::from_row)
+            .map_err(Error::Sql)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Sql)?;
+        Ok(rows)
+    }
+
     fn chunk_messages(&self, chunk_id: &str) -> Result<Vec<String>> {
         let mut stmt = self
             .conn

@@ -229,10 +229,16 @@ where
     }
 
     if let Some(url) = frame.cdn_url.as_deref().filter(|_| options.cdn_enabled) {
-        match url_expires(url) {
-            Some(expires) if expires < options.now_epoch => why.push("cdn-expired".to_string()),
-            _ => match fetcher(url, options.cdn_timeout).and_then(|body| {
-                verify_cdn_checksum(&body, frame.checksum_sha1.as_deref())?;
+        let expired = matches!(url_expires(url), Some(expires) if expires < options.now_epoch);
+        let fingerprint = frame
+            .checksum_sha1
+            .as_deref()
+            .filter(|value| !value.is_empty());
+        if expired {
+            why.push("cdn-expired".to_string());
+        } else if let Some(fingerprint) = fingerprint {
+            match fetcher(url, options.cdn_timeout).and_then(|body| {
+                verify_cdn_checksum(&body, fingerprint)?;
                 Ok(body)
             }) {
                 Ok(body) => {
@@ -253,7 +259,21 @@ where
                     why.push("cdn-failed".to_string());
                     errors.push(error_record(frame, "cdn", &redact_url(url), err));
                 }
-            },
+            }
+        } else {
+            // The attachment carries no `cs`, so a fetched body could not be checked against
+            // anything. Downloading it anyway would put unverified network bytes on disk under
+            // a contract that promises the opposite, so the tier is skipped and said out loud.
+            why.push("cdn-unverifiable".to_string());
+            errors.push(error_record(
+                frame,
+                "cdn",
+                &redact_url(url),
+                Error::Kakao(
+                    "attachment carries no cs fingerprint; refusing to store an unverifiable cdn body"
+                        .to_string(),
+                ),
+            ));
         }
     }
 
@@ -344,10 +364,12 @@ fn read_and_decrypt(path: &Path, log_id: i64) -> Result<Vec<u8>> {
     decrypt_pkv2_image(&bytes, log_id)
 }
 
-fn verify_cdn_checksum(body: &[u8], expected: Option<&str>) -> Result<()> {
-    let Some(expected) = expected.filter(|value| !value.is_empty()) else {
-        return Ok(());
-    };
+/// Compare a fetched CDN body against the attachment fingerprint.
+///
+/// Takes the fingerprint by value rather than as an `Option` on purpose: an absent `cs` used to
+/// return `Ok(())` here, which let unverified bytes reach disk. Callers must decide what to do
+/// about a missing fingerprint before they fetch.
+fn verify_cdn_checksum(body: &[u8], expected: &str) -> Result<()> {
     let actual = sha1_hex(body);
     if actual.eq_ignore_ascii_case(expected) {
         Ok(())
@@ -542,6 +564,50 @@ mod tests {
         assert_eq!(report.records[0].tier_reason, "full-not-cached+cdn-fetched");
         assert_eq!(report.records[0].sha1.as_deref(), Some(VECTOR_IMAGE_SHA1));
         options.cdn_enabled = false;
+    }
+
+    #[test]
+    fn cdn_without_cs_fingerprint_is_refused_not_stored() {
+        let (_, dirs, options) = fixture();
+        let mut input = frame();
+        input.checksum_sha1 = None;
+        input.cdn_url = Some("https://cdn.example/image?expires=1900000000".to_string());
+
+        let report =
+            resolve_media_frames_with_fetcher(CHAT_ID, &[input], &dirs, &options, |_, _| {
+                panic!("cdn must not be fetched when the body could not be verified")
+            })
+            .expect("resolve");
+
+        let record = &report.records[0];
+        assert_eq!(record.tier, MediaTier::Stub);
+        assert!(
+            record.tier_reason.contains("cdn-unverifiable"),
+            "tier_reason must say why the cdn tier was skipped, got {}",
+            record.tier_reason
+        );
+        assert!(record.path.is_none(), "nothing may be written to disk");
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.errors[0].stage, "cdn");
+        assert!(report.errors[0].error.contains("no cs fingerprint"));
+    }
+
+    #[test]
+    fn cdn_with_empty_cs_fingerprint_is_refused_not_stored() {
+        let (_, dirs, options) = fixture();
+        let mut input = frame();
+        input.checksum_sha1 = Some(String::new());
+        input.cdn_url = Some("https://cdn.example/image?expires=1900000000".to_string());
+
+        let report =
+            resolve_media_frames_with_fetcher(CHAT_ID, &[input], &dirs, &options, |_, _| {
+                panic!("cdn must not be fetched when the body could not be verified")
+            })
+            .expect("resolve");
+
+        assert_eq!(report.records[0].tier, MediaTier::Stub);
+        assert!(report.records[0].path.is_none());
+        assert_eq!(report.errors.len(), 1);
     }
 
     #[test]

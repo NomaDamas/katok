@@ -22,6 +22,25 @@ pub struct SyncReport {
     pub updated_messages: usize,
     pub total_messages: usize,
     pub chunks: usize,
+    /// How many chats had their chunks recomputed. A quiet sync touches very few.
+    pub rebuilt_chats: usize,
+    /// Wall-clock milliseconds per stage, so "sync is slow" can be answered with a number
+    /// instead of a guess about which stage is at fault.
+    pub timings_ms: SyncTimings,
+    /// Which chats changed. Internal: the caller uses it to scope the chunk rebuild, and it is
+    /// too long on a first sync to be worth printing.
+    #[serde(skip)]
+    pub touched_chats: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SyncTimings {
+    /// Decrypting and scanning the KakaoTalk database.
+    pub read_source: u128,
+    /// Upserting chats and messages into the archive.
+    pub upsert_messages: u128,
+    /// Rebuilding chunks and parent windows.
+    pub rebuild_chunks: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]

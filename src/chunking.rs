@@ -24,6 +24,17 @@ impl Default for ChunkSettings {
     }
 }
 
+/// Bump when the chunk or parent-window boundary rules change.
+///
+/// Chunking is scoped to the chats that changed, so a logic change would otherwise only reach
+/// rooms that happen to receive a message and quiet rooms would keep artifacts from the old
+/// algorithm forever — the same failure the gap settings had. Recording this alongside the gap
+/// values makes an upgraded binary rebuild everything once.
+///
+/// Covers `should_start_new_chunk`, `should_start_parent_window`, the parent-window size limits,
+/// and the `stable_chunk_id` salt.
+pub const CHUNKER_VERSION: i64 = 1;
+
 pub fn rebuild_chunks(archive: &Archive) -> Result<usize> {
     rebuild_chunks_with_settings(archive, ChunkSettings::default())
 }
@@ -35,6 +46,25 @@ pub fn rebuild_chunks_with_settings(archive: &Archive, settings: ChunkSettings) 
     let count = drafts.len();
     archive.replace_chunks(&drafts, &parents)?;
     Ok(count)
+}
+
+/// Recompute chunks for `chat_ids` only, leaving other chats untouched.
+///
+/// Produces the same rows a full rebuild would: boundaries depend only on the previous message
+/// and never cross a chat, and `chunk_id` is derived from content rather than position.
+pub fn rebuild_chunks_for_chats(
+    archive: &Archive,
+    settings: ChunkSettings,
+    chat_ids: &[String],
+) -> Result<usize> {
+    if chat_ids.is_empty() {
+        return archive.chunk_count();
+    }
+    let messages = archive.raw_messages_for_chats(chat_ids)?;
+    let drafts = build_chunks(&messages, settings)?;
+    let parents = build_parent_windows(&drafts)?;
+    archive.replace_chunks_for_chats(chat_ids, &drafts, &parents)?;
+    archive.chunk_count()
 }
 
 fn build_chunks(messages: &[StoredMessage], settings: ChunkSettings) -> Result<Vec<ChunkDraft>> {

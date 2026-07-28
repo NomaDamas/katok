@@ -24,8 +24,8 @@ use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
 };
-use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use std::ffi::c_void;
 use std::path::Path;
 use std::process::Command;
@@ -55,13 +55,11 @@ const ROLE_CELL: &str = "AXCell";
 const ROLE_STATIC_TEXT: &str = "AXStaticText";
 const ROLE_TEXT_FIELD: &str = "AXTextField";
 
-const ATTR_SELECTED: &str = "AXSelected";
 const ATTR_DESCRIPTION: &str = "AXDescription";
 
 const ATTR_FRONTMOST: &str = "AXFrontmost";
 const ATTR_ROWS: &str = "AXRows";
 const ATTR_FOCUSED: &str = "AXFocused";
-const ATTR_MAIN: &str = "AXMain";
 const ATTR_POSITION: &str = "AXPosition";
 const ATTR_SIZE: &str = "AXSize";
 
@@ -253,8 +251,7 @@ fn put_image_on_clipboard(path: &Path) -> Result<(), SendError> {
 
     let mut pasteboard: PasteboardRef = std::ptr::null_mut();
     let clipboard_name = CFString::new(PASTEBOARD_CLIPBOARD);
-    let status =
-        unsafe { PasteboardCreate(clipboard_name.as_concrete_TypeRef(), &mut pasteboard) };
+    let status = unsafe { PasteboardCreate(clipboard_name.as_concrete_TypeRef(), &mut pasteboard) };
     if status != OS_NO_ERR || pasteboard.is_null() {
         return Err(SendError::ClipboardFailed(status));
     }
@@ -270,7 +267,7 @@ fn put_image_on_clipboard(path: &Path) -> Result<(), SendError> {
     let status = unsafe {
         PasteboardPutItemFlavor(
             pasteboard,
-            1 as *const c_void, // any non-null item id; a single item is enough
+            std::ptr::dangling::<c_void>(), // any non-null item id; a single item is enough
             flavor.as_concrete_TypeRef(),
             data.as_concrete_TypeRef(),
             0,
@@ -363,7 +360,7 @@ pub fn send_image_to_open_window(
     }
     let pid = kakaotalk_pid().ok_or(SendError::NotRunning)?;
     let app = AxRef(unsafe { AXUIElementCreateApplication(pid) });
-    let window = resolve_window(pid, &app, room, allow_open)?;
+    let window = resolve_window(&app, room, allow_open)?;
 
     put_image_on_clipboard(image_path)?;
     let before = transcript_row_count(window.as_raw());
@@ -375,7 +372,11 @@ pub fn send_image_to_open_window(
     let front_key = CFString::new(ATTR_FRONTMOST);
     let yes = core_foundation::boolean::CFBoolean::true_value();
     unsafe {
-        AXUIElementSetAttributeValue(app.as_raw(), front_key.as_concrete_TypeRef(), yes.as_CFTypeRef())
+        AXUIElementSetAttributeValue(
+            app.as_raw(),
+            front_key.as_concrete_TypeRef(),
+            yes.as_CFTypeRef(),
+        )
     };
     std::thread::sleep(std::time::Duration::from_millis(250));
 
@@ -642,7 +643,11 @@ fn open_row_by_click(
     let front = CFString::new(ATTR_FRONTMOST);
     let yes = core_foundation::boolean::CFBoolean::true_value();
     unsafe {
-        AXUIElementSetAttributeValue(app.as_raw(), front.as_concrete_TypeRef(), yes.as_CFTypeRef())
+        AXUIElementSetAttributeValue(
+            app.as_raw(),
+            front.as_concrete_TypeRef(),
+            yes.as_CFTypeRef(),
+        )
     };
     // A click lands on whatever window is on top at those coordinates, so the list has to be
     // raised above any chat windows before aiming at it.
@@ -655,13 +660,19 @@ fn open_row_by_click(
     // Read geometry after raising: the row can move as the window comes forward.
     let rect = frame_of(row).ok_or_else(|| SendError::RoomOpenFailed(room.to_string()))?;
 
-    let target = CGPoint::new(rect.origin.x + rect.size.width / 2.0, rect.origin.y + rect.size.height / 2.0);
+    let target = CGPoint::new(
+        rect.origin.x + rect.size.width / 2.0,
+        rect.origin.y + rect.size.height / 2.0,
+    );
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| SendError::KeyEventFailed)?;
     let restore = CGEvent::new(source.clone()).ok().map(|e| e.location());
 
     for click in 1..=2 {
-        for (kind, _) in [(CGEventType::LeftMouseDown, ()), (CGEventType::LeftMouseUp, ())] {
+        for (kind, _) in [
+            (CGEventType::LeftMouseDown, ()),
+            (CGEventType::LeftMouseUp, ()),
+        ] {
             let ev = CGEvent::new_mouse_event(source.clone(), kind, target, CGMouseButton::Left)
                 .map_err(|_| SendError::KeyEventFailed)?;
             ev.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click);
@@ -690,13 +701,15 @@ fn search_field(window: AXUIElementRef) -> Option<AxRef> {
     if let Some(f) = field(window) {
         return Some(f);
     }
-    let button = child_elements(window, ATTR_CHILDREN).into_iter().find(|c| {
-        role_of(c.as_raw()) == ROLE_BUTTON
-            && matches!(
-                attr_string(c.as_raw(), ATTR_DESCRIPTION).as_deref(),
-                Some("검색") | Some("Search")
-            )
-    })?;
+    let button = child_elements(window, ATTR_CHILDREN)
+        .into_iter()
+        .find(|c| {
+            role_of(c.as_raw()) == ROLE_BUTTON
+                && matches!(
+                    attr_string(c.as_raw(), ATTR_DESCRIPTION).as_deref(),
+                    Some("검색") | Some("Search")
+                )
+        })?;
     let action = CFString::new(ACTION_PRESS);
     unsafe { AXUIElementPerformAction(button.as_raw(), action.as_concrete_TypeRef()) };
     for _ in 0..10 {
@@ -719,7 +732,11 @@ fn open_room_via_search(app: &AxRef, windows: &[AxRef], room: &str) -> Result<()
     let key = CFString::new(ATTR_VALUE);
     let value = CFString::new(room);
     let err = unsafe {
-        AXUIElementSetAttributeValue(field.as_raw(), key.as_concrete_TypeRef(), value.as_CFTypeRef())
+        AXUIElementSetAttributeValue(
+            field.as_raw(),
+            key.as_concrete_TypeRef(),
+            value.as_CFTypeRef(),
+        )
     };
     if err != AX_SUCCESS {
         return Err(SendError::SearchUnavailable);
@@ -802,7 +819,7 @@ fn clear_search(windows: &[AxRef]) {
 }
 
 /// Find the chat window for `room`, opening it from the chat list when it is not already up.
-fn resolve_window(pid: i32, app: &AxRef, room: &str, allow_open: bool) -> Result<AxRef, SendError> {
+fn resolve_window(app: &AxRef, room: &str, allow_open: bool) -> Result<AxRef, SendError> {
     let find = || {
         let windows = child_elements(app.as_raw(), ATTR_WINDOWS);
         let hit = windows
@@ -886,7 +903,11 @@ where
 }
 
 fn kakaotalk_pid() -> Option<i32> {
-    let out = Command::new("pgrep").arg("-x").arg("KakaoTalk").output().ok()?;
+    let out = Command::new("pgrep")
+        .arg("-x")
+        .arg("KakaoTalk")
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -909,10 +930,10 @@ pub fn send_to_open_window(room: &str, text: &str, allow_open: bool) -> Result<(
     }
     let pid = kakaotalk_pid().ok_or(SendError::NotRunning)?;
     let app = AxRef(unsafe { AXUIElementCreateApplication(pid) });
-    let window = resolve_window(pid, &app, room, allow_open)?;
+    let window = resolve_window(&app, room, allow_open)?;
 
-    let compose =
-        compose_box(window.as_raw()).ok_or_else(|| SendError::ComposeBoxNotFound(room.to_string()))?;
+    let compose = compose_box(window.as_raw())
+        .ok_or_else(|| SendError::ComposeBoxNotFound(room.to_string()))?;
 
     // Make the compose box the app's focused element before typing. Enter is delivered to
     // KakaoTalk as a whole, and KakaoTalk routes it to whatever it considers focused — with
@@ -968,7 +989,11 @@ pub fn send_to_open_window(room: &str, text: &str, allow_open: bool) -> Result<(
     let yes = core_foundation::boolean::CFBoolean::true_value();
     let front = CFString::new(ATTR_FRONTMOST);
     unsafe {
-        AXUIElementSetAttributeValue(app.as_raw(), front.as_concrete_TypeRef(), yes.as_CFTypeRef())
+        AXUIElementSetAttributeValue(
+            app.as_raw(),
+            front.as_concrete_TypeRef(),
+            yes.as_CFTypeRef(),
+        )
     };
     let raise = CFString::new(ACTION_RAISE);
     unsafe { AXUIElementPerformAction(window.as_raw(), raise.as_concrete_TypeRef()) };
@@ -994,7 +1019,7 @@ pub fn resolve_room_window(room: &str, allow_open: bool) -> Result<(), SendError
     }
     let pid = kakaotalk_pid().ok_or(SendError::NotRunning)?;
     let app = AxRef(unsafe { AXUIElementCreateApplication(pid) });
-    resolve_window(pid, &app, room, allow_open).map(|_| ())
+    resolve_window(&app, room, allow_open).map(|_| ())
 }
 
 /// Room names from the chat list, newest first. Used to find the exact name to pass to `--room`.

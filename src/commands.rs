@@ -4,12 +4,17 @@ use crate::support::{dependency_status, print_payload};
 use anyhow::{Context, Result};
 use katok::{
     archive::Archive,
-    chunking::{rebuild_chunks_with_settings, ChunkSettings},
+    chunking::{
+        rebuild_chunks_for_chats, rebuild_chunks_with_settings, ChunkSettings, CHUNKER_VERSION,
+    },
     config::KatokConfig,
     search::{bm25_search_with_snippet, keyword_search_with_snippet},
     semantic::{semantic_search_live_with_config, semantic_search_with_snippet},
+    transcript::export_transcript,
+    types::SyncTimings,
 };
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 mod chunk_commands;
 mod freshness;
@@ -57,6 +62,12 @@ pub(crate) fn run(
         Commands::Media { command } => media_commands::run(command, &data_dir),
         Commands::Permissions { command } => run_permissions(command),
         Commands::Chunks { chat, json } => run_chunks(&chat, json, &archive_path),
+        Commands::Transcript {
+            chat,
+            since,
+            out,
+            json,
+        } => run_transcript(&chat, since.as_deref(), out, json, &archive_path, &data_dir),
         Commands::WipeIndex { yes, json } => run_wipe_index(yes, json, &semantic_dir),
         #[cfg(target_os = "macos")]
         Commands::Send {
@@ -234,18 +245,75 @@ fn run_sync(
     data_dir: &Path,
 ) -> Result<()> {
     let adapter = adapter_for_source(source, path, data_dir)?;
+    let read_started = Instant::now();
     let messages = adapter.messages().context("read source messages")?;
+    let read_source = read_started.elapsed().as_millis();
     let archive = Archive::open(archive_path).context("open archive")?;
-    let mut report = archive.sync_messages(&messages).context("sync messages")?;
-    report.chunks = rebuild_chunks_with_settings(
-        &archive,
-        ChunkSettings {
+    // Message upserts and the chunk rebuild are one unit: chunks derived from half-written
+    // messages are not a usable archive state, so either both land or neither does.
+    let report = archive.in_transaction(|| {
+        let upsert_started = Instant::now();
+        let mut report = archive.sync_messages(&messages).context("sync messages")?;
+        let upsert_messages = upsert_started.elapsed().as_millis();
+
+        let rebuild_started = Instant::now();
+        let settings = ChunkSettings {
             group_gap_seconds: config.chunk_gap_group_seconds,
             direct_gap_seconds: config.chunk_gap_direct_seconds,
-        },
-    )
-    .context("rebuild chunks")?;
+        };
+        // Recompute only the chats that changed. Three cases still need the full pass: a first
+        // sync has no chunks to scope to, a gap-settings change invalidates every existing
+        // chunk, and a chunker-version bump does the same — which includes the first run
+        // against an archive written before the version was recorded. Without these checks a
+        // settings or algorithm change would only ever reach rooms that happened to receive a
+        // message, leaving the rest on the old boundaries forever.
+        let stored_settings = archive
+            .stored_chunk_settings()
+            .context("read chunk settings")?;
+        let settings_changed = stored_settings
+            != Some((
+                settings.group_gap_seconds,
+                settings.direct_gap_seconds,
+                CHUNKER_VERSION,
+            ));
+        report.chunks = if archive.chunk_count().context("count chunks")? == 0 || settings_changed {
+            rebuild_chunks_with_settings(&archive, settings).context("rebuild chunks")?
+        } else {
+            rebuild_chunks_for_chats(&archive, settings, &report.touched_chats)
+                .context("rebuild chunks")?
+        };
+        archive
+            .record_chunk_settings(
+                settings.group_gap_seconds,
+                settings.direct_gap_seconds,
+                CHUNKER_VERSION,
+            )
+            .context("record chunk settings")?;
+
+        report.timings_ms = SyncTimings {
+            read_source,
+            upsert_messages,
+            rebuild_chunks: rebuild_started.elapsed().as_millis(),
+        };
+        Ok::<_, anyhow::Error>(report)
+    })?;
     freshness::record_sync(data_dir, source, report.total_messages, report.chunks)?;
+    print_payload(json, &report)
+}
+
+fn run_transcript(
+    chat: &str,
+    since: Option<&str>,
+    out: Option<PathBuf>,
+    json: bool,
+    archive_path: &Path,
+    data_dir: &Path,
+) -> Result<()> {
+    let archive = Archive::open(archive_path).context("open archive")?;
+    // Transcripts hold raw message bodies, so they default under the katok data dir rather than
+    // the working directory, where they could be committed by accident.
+    let out_dir = out.unwrap_or_else(|| data_dir.join("transcripts"));
+    let report = export_transcript(&archive, chat, since, &out_dir).context("export transcript")?;
     print_payload(json, &report)
 }
 
