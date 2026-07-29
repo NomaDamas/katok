@@ -34,7 +34,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use core_foundation::runloop::{kCFRunLoopCommonModes, kCFRunLoopDefaultMode, CFRunLoop};
 use core_graphics::event::{
@@ -45,9 +45,11 @@ use core_graphics::geometry::CGPoint;
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSFont, NSScreen,
-    NSTextAlignment, NSTextField, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowLevel,
-    NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBox, NSBoxType, NSColor,
+    NSControlSize, NSFont, NSFontWeightMedium, NSProgressIndicator, NSProgressIndicatorStyle,
+    NSScreen, NSTextAlignment, NSTextField, NSTitlePosition, NSView, NSVisualEffectBlendingMode,
+    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow,
+    NSWindowCollectionBehavior, NSWindowLevel, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
@@ -198,14 +200,13 @@ where
 
     let mut visible = false;
     let mut last_revision = 0usize;
-    let started = Instant::now();
     while !done.load(Ordering::SeqCst) {
         let want = control.shown.load(Ordering::SeqCst);
         let revision = control.revision.load(Ordering::SeqCst);
         autoreleasepool(|_| {
             if want && (!visible || revision != last_revision) {
                 let subtitle = control.subtitle.lock().expect("curtain subtitle").clone();
-                curtain.show(&subtitle, started.elapsed());
+                curtain.show(&subtitle);
                 *cancel_rect.lock().expect("cancel rect") = curtain.cancel_rect();
                 last_revision = revision;
                 visible = true;
@@ -213,8 +214,6 @@ where
                 curtain.hide();
                 *cancel_rect.lock().expect("cancel rect") = CancelRect::default();
                 visible = false;
-            } else if visible {
-                curtain.tick(started.elapsed());
             }
         });
         // Servicing this run loop is what delivers tap callbacks and lets the
@@ -324,17 +323,46 @@ impl Drop for TapGuard<'_> {
     }
 }
 
-const SPINNER: [&str; 8] = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
-const CANCEL_LABEL: &str = "취소 (Esc)";
+const CANCEL_LABEL: &str = "취소  ·  Esc";
+
+// Card geometry. Laid out from the top down in a fixed-size card so nothing
+// depends on measuring at runtime, which is where the first version went wrong.
+const CARD_W: f64 = 380.0;
+const CARD_H: f64 = 184.0;
+const SPINNER_SIZE: f64 = 20.0;
+const CANCEL_W: f64 = 132.0;
+const CANCEL_H: f64 = 34.0;
+const CANCEL_Y: f64 = 17.0;
+
+/// How strongly the backdrop is frosted, 0.0 (fully see-through) to 1.0.
+///
+/// Deliberately low: the point is to say "input is blocked", not to hide the
+/// screen. The card carries that message on its own, so the blur only needs to
+/// push the desktop back a little. Turn this up if the card stops reading
+/// against a busy background.
+const SCRIM_ALPHA: f64 = 0.38;
 
 struct CurtainWindows {
     windows: Vec<Retained<NSWindow>>,
-    title_label: Option<Retained<NSTextField>>,
     subtitle_label: Option<Retained<NSTextField>>,
-    cancel_label: Option<Retained<NSTextField>>,
+    spinner: Option<Retained<NSProgressIndicator>>,
     cancel_rect: CancelRect,
-    title: String,
     visible: bool,
+}
+
+/// Place a label at an exact height with no vertical slack.
+///
+/// An `NSTextField` draws its text against the top of whatever frame it is
+/// given, so a label dropped into an oversized box sits high in it and a
+/// "button" built that way has its caption clinging to the top edge. Sizing to
+/// the text first and positioning that exact height is what actually centers it.
+fn place_label(field: &NSTextField, container_width: f64, x: f64, center_y: f64) {
+    field.sizeToFit();
+    let height = field.frame().size.height;
+    field.setFrame(NSRect::new(
+        NSPoint::new(x, center_y - height / 2.0),
+        NSSize::new(container_width, height),
+    ));
 }
 
 impl CurtainWindows {
@@ -345,9 +373,8 @@ impl CurtainWindows {
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
         let mut windows = Vec::new();
-        let mut title_label = None;
         let mut subtitle_label = None;
-        let mut cancel_label = None;
+        let mut spinner = None;
         let mut cancel_rect = CancelRect::default();
 
         let screens = NSScreen::screens(mtm);
@@ -368,9 +395,7 @@ impl CurtainWindows {
                 )
             };
             window.setOpaque(false);
-            window.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-                0.05, 0.05, 0.07, 0.62,
-            )));
+            window.setBackgroundColor(Some(&NSColor::clearColor()));
             // Above normal windows and full-screen apps alike.
             window.setLevel(NSWindowLevel::from(1000isize));
             window.setCollectionBehavior(
@@ -387,53 +412,97 @@ impl CurtainWindows {
             // clickable.
             window.setIgnoresMouseEvents(true);
 
-            // Only the primary screen carries the text; the others just dim.
+            // A light frost rather than a flat wash: it reads as a system
+            // overlay and follows the appearance the user already chose, while
+            // staying transparent enough to see what is behind it. Covering the
+            // screen is not the goal — blocking input is, and the card says so.
+            let content: Retained<NSView> = window.contentView().expect("curtain content view");
+            let scrim = NSVisualEffectView::initWithFrame(
+                NSVisualEffectView::alloc(mtm),
+                NSRect::new(NSPoint::new(0.0, 0.0), frame.size),
+            );
+            scrim.setMaterial(NSVisualEffectMaterial::FullScreenUI);
+            scrim.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+            scrim.setState(NSVisualEffectState::Active);
+            scrim.setAlphaValue(SCRIM_ALPHA);
+            content.addSubview(&scrim);
+
+            // Only the primary screen carries the card; the others just dim.
             if index == 0 {
-                let content: Retained<NSView> = window.contentView().expect("curtain content view");
-                let width = frame.size.width;
-                let mid_y = frame.size.height / 2.0;
-
-                let title_field = label(mtm, title, 34.0, 1.0);
-                title_field.setFrame(NSRect::new(
-                    NSPoint::new(0.0, mid_y + 26.0),
-                    NSSize::new(width, 48.0),
+                let card_x = ((frame.size.width - CARD_W) / 2.0).round();
+                let card_y = ((frame.size.height - CARD_H) / 2.0).round();
+                let card = NSBox::initWithFrame(
+                    NSBox::alloc(mtm),
+                    NSRect::new(NSPoint::new(card_x, card_y), NSSize::new(CARD_W, CARD_H)),
+                );
+                card.setBoxType(NSBoxType::Custom);
+                card.setTitlePosition(NSTitlePosition::NoTitle);
+                card.setCornerRadius(18.0);
+                card.setBorderWidth(0.0);
+                card.setFillColor(&NSColor::colorWithSRGBRed_green_blue_alpha(
+                    1.0, 1.0, 1.0, 0.94,
                 ));
-                content.addSubview(&title_field);
+                card.setContentViewMargins(NSSize::new(0.0, 0.0));
+                content.addSubview(&card);
+                let card_view: Retained<NSView> = card.contentView().expect("card content view");
 
-                let subtitle_field = label(mtm, "", 17.0, 0.72);
-                subtitle_field.setFrame(NSRect::new(
-                    NSPoint::new(0.0, mid_y - 6.0),
-                    NSSize::new(width, 26.0),
-                ));
-                content.addSubview(&subtitle_field);
+                let indicator = NSProgressIndicator::initWithFrame(
+                    NSProgressIndicator::alloc(mtm),
+                    NSRect::new(
+                        NSPoint::new((CARD_W - SPINNER_SIZE) / 2.0, CARD_H - 28.0 - SPINNER_SIZE),
+                        NSSize::new(SPINNER_SIZE, SPINNER_SIZE),
+                    ),
+                );
+                indicator.setStyle(NSProgressIndicatorStyle::Spinning);
+                indicator.setIndeterminate(true);
+                indicator.setControlSize(NSControlSize::Small);
+                card_view.addSubview(&indicator);
 
-                let cancel_field = label(mtm, CANCEL_LABEL, 15.0, 0.85);
-                let cancel_w = 176.0;
-                let cancel_h = 40.0;
-                let cancel_x = (width - cancel_w) / 2.0;
-                let cancel_y = mid_y - 86.0;
-                cancel_field.setFrame(NSRect::new(
-                    NSPoint::new(cancel_x, cancel_y),
-                    NSSize::new(cancel_w, cancel_h),
+                let title_field = label(mtm, title, 19.0, 0.12, true);
+                place_label(&title_field, CARD_W, 0.0, 108.0);
+                card_view.addSubview(&title_field);
+
+                let subtitle_field = label(mtm, "", 13.0, 0.45, false);
+                place_label(&subtitle_field, CARD_W, 0.0, 82.0);
+                card_view.addSubview(&subtitle_field);
+
+                let cancel_x = ((CARD_W - CANCEL_W) / 2.0).round();
+                let cancel_box = NSBox::initWithFrame(
+                    NSBox::alloc(mtm),
+                    NSRect::new(
+                        NSPoint::new(cancel_x, CANCEL_Y),
+                        NSSize::new(CANCEL_W, CANCEL_H),
+                    ),
+                );
+                cancel_box.setBoxType(NSBoxType::Custom);
+                cancel_box.setTitlePosition(NSTitlePosition::NoTitle);
+                cancel_box.setCornerRadius(9.0);
+                cancel_box.setBorderWidth(0.0);
+                cancel_box.setFillColor(&NSColor::colorWithSRGBRed_green_blue_alpha(
+                    0.0, 0.0, 0.0, 0.06,
                 ));
-                cancel_field.setDrawsBackground(true);
-                cancel_field.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-                    1.0, 1.0, 1.0, 0.14,
-                )));
-                content.addSubview(&cancel_field);
+                cancel_box.setContentViewMargins(NSSize::new(0.0, 0.0));
+                card_view.addSubview(&cancel_box);
+                let cancel_view: Retained<NSView> =
+                    cancel_box.contentView().expect("cancel content view");
+                let cancel_field = label(mtm, CANCEL_LABEL, 13.0, 0.38, false);
+                // Centred inside the button's own box, which is the part the
+                // first version got wrong.
+                place_label(&cancel_field, CANCEL_W, 0.0, CANCEL_H / 2.0);
+                cancel_view.addSubview(&cancel_field);
 
                 // CGEvent locations use a top-left origin; Cocoa frames a
                 // bottom-left one, so the hit rect has to be flipped.
+                let cancel_origin_y = frame.origin.y + card_y + CANCEL_Y;
                 cancel_rect = CancelRect {
-                    x: frame.origin.x + cancel_x,
-                    y: main_height - (frame.origin.y + cancel_y + cancel_h),
-                    w: cancel_w,
-                    h: cancel_h,
+                    x: frame.origin.x + card_x + cancel_x,
+                    y: main_height - (cancel_origin_y + CANCEL_H),
+                    w: CANCEL_W,
+                    h: CANCEL_H,
                 };
 
-                title_label = Some(title_field);
                 subtitle_label = Some(subtitle_field);
-                cancel_label = Some(cancel_field);
+                spinner = Some(indicator);
             }
 
             windows.push(window);
@@ -441,11 +510,9 @@ impl CurtainWindows {
 
         Self {
             windows,
-            title_label,
             subtitle_label,
-            cancel_label,
+            spinner,
             cancel_rect,
-            title: title.to_string(),
             visible: false,
         }
     }
@@ -458,30 +525,26 @@ impl CurtainWindows {
         }
     }
 
-    fn show(&mut self, subtitle: &str, elapsed: Duration) {
+    fn show(&mut self, subtitle: &str) {
         if let Some(field) = &self.subtitle_label {
             field.setStringValue(&NSString::from_str(subtitle));
+            // Re-centre: the subtitle changes per send, so its fitted width does
+            // too, and a stale frame would leave it visibly off-centre.
+            place_label(field, CARD_W, 0.0, 82.0);
         }
-        if let Some(field) = &self.cancel_label {
-            field.setStringValue(&NSString::from_str(CANCEL_LABEL));
+        if let Some(spinner) = &self.spinner {
+            unsafe { spinner.startAnimation(None) };
         }
         for window in &self.windows {
             window.orderFrontRegardless();
         }
         self.visible = true;
-        self.tick(elapsed);
-    }
-
-    fn tick(&self, elapsed: Duration) {
-        let Some(field) = &self.title_label else {
-            return;
-        };
-        let frame = (elapsed.as_millis() / 90) as usize % SPINNER.len();
-        let text = format!("{}  {}", SPINNER[frame], self.title);
-        field.setStringValue(&NSString::from_str(&text));
     }
 
     fn hide(&mut self) {
+        if let Some(spinner) = &self.spinner {
+            unsafe { spinner.stopAnimation(None) };
+        }
         for window in &self.windows {
             window.orderOut(None);
         }
@@ -489,12 +552,23 @@ impl CurtainWindows {
     }
 }
 
-fn label(mtm: MainThreadMarker, text: &str, size: f64, alpha: f64) -> Retained<NSTextField> {
+fn label(
+    mtm: MainThreadMarker,
+    text: &str,
+    size: f64,
+    darkness: f64,
+    medium: bool,
+) -> Retained<NSTextField> {
     let field = NSTextField::labelWithString(&NSString::from_str(text), mtm);
     field.setAlignment(NSTextAlignment::Center);
-    field.setFont(Some(&NSFont::systemFontOfSize(size)));
+    let font = if medium {
+        unsafe { NSFont::systemFontOfSize_weight(size, NSFontWeightMedium) }
+    } else {
+        NSFont::systemFontOfSize(size)
+    };
+    field.setFont(Some(&font));
     field.setTextColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-        1.0, 1.0, 1.0, alpha,
+        darkness, darkness, darkness, 1.0,
     )));
     field.setDrawsBackground(false);
     field
@@ -537,10 +611,10 @@ mod tests {
             panic!("worker blew up");
         });
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !done.load(Ordering::SeqCst) {
             assert!(
-                Instant::now() < deadline,
+                std::time::Instant::now() < deadline,
                 "completion flag never set: the pump would spin with the curtain up"
             );
             std::thread::sleep(Duration::from_millis(10));
