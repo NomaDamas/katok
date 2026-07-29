@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha1::{Digest, Sha1};
+use unicode_normalization::UnicodeNormalization;
 
 use super::media_crypto::decrypt_pkv2_image;
 use super::media_paths::MediaDirs;
@@ -266,21 +267,51 @@ fn known_output_name(frame: &MediaFrameInput) -> Option<String> {
     Some(format!("{}_{}", frame.output_stem, safe))
 }
 
+/// Characters that are invisible, or that reorder what follows them, and so
+/// have no business in a filename.
+///
+/// The bidi overrides are the reason this exists rather than being a nicety:
+/// a name like `invoice\u{202e}gpj.exe` renders as `invoiceexe.jpg`, which is a
+/// well-known way to disguise an executable. Anyone can send an attachment, so
+/// its declared name is untrusted input.
+fn is_invisible_or_reordering(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}'                      // soft hyphen
+        | '\u{180E}'                    // mongolian vowel separator
+        | '\u{200B}'..='\u{200F}'       // zero-width spaces/joiners, LRM, RLM
+        | '\u{202A}'..='\u{202E}'       // bidi embedding and override
+        | '\u{2060}'..='\u{2064}'       // word joiner, invisible operators
+        | '\u{2066}'..='\u{2069}'       // bidi isolates
+        | '\u{FEFF}'                    // zero-width no-break space / BOM
+    )
+}
+
 /// Reduce an attachment filename to something that cannot escape the output
-/// directory or collide with the temp-file convention.
+/// directory, disguise its own extension, or collide with the temp-file
+/// convention.
 ///
 /// KakaoTalk does not constrain the name, so it can carry separators, dot
-/// segments, control characters, or be long enough to blow past the filesystem
-/// limit. The extension is preserved because it is what makes the output
-/// openable.
+/// segments, control characters, invisible formatting, or be long enough to
+/// blow past the filesystem limit. The extension is preserved because it is
+/// what makes the output openable.
+///
+/// The result is normalized to NFC. A name that arrives decomposed — which is
+/// what a macOS sender's HFS+ era filename looks like — would otherwise be
+/// stored in a form that does not match what a person types into a search box,
+/// even though it looks identical on screen.
 fn sanitize_filename(name: &str) -> String {
     const MAX_STEM_BYTES: usize = 120;
 
     let cleaned: String = name
-        .chars()
+        .nfc()
+        .filter(|c| !is_invisible_or_reordering(*c))
         .map(|c| {
             if c == '/' || c == '\\' || c == ':' || c.is_control() {
                 '_'
+            } else if c.is_whitespace() {
+                // Collapse exotic spaces (NBSP, thin, ideographic) to a plain
+                // one so two visually identical names cannot differ in bytes.
+                ' '
             } else {
                 c
             }
@@ -951,6 +982,41 @@ mod tests {
                 "{hostile} sanitized to {out}"
             );
         }
+    }
+
+    #[test]
+    fn sanitized_filename_strips_bidi_override_that_disguises_an_extension() {
+        // Renders as "invoiceexe.jpg" in most UIs while actually ending .exe.
+        let disguised = "invoice\u{202e}gpj.exe";
+        let out = sanitize_filename(disguised);
+        assert!(!out.contains('\u{202e}'), "bidi override survived: {out:?}");
+        assert!(
+            out.ends_with(".exe"),
+            "real extension must stay visible: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitized_filename_strips_invisible_characters() {
+        for hidden in ['\u{200B}', '\u{200D}', '\u{FEFF}', '\u{2060}', '\u{00AD}'] {
+            let out = sanitize_filename(&format!("re{hidden}port.pdf"));
+            assert_eq!(out, "report.pdf", "{hidden:?} survived");
+        }
+    }
+
+    #[test]
+    fn sanitized_filename_is_normalized_to_nfc() {
+        // Decomposed Hangul: what a name from an older macOS sender looks like.
+        let decomposed = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}.pdf";
+        let out = sanitize_filename(decomposed);
+        assert_eq!(out, "한글.pdf");
+        // Two names that look identical must not differ in bytes on disk.
+        assert_eq!(out, sanitize_filename("한글.pdf"));
+    }
+
+    #[test]
+    fn sanitized_filename_collapses_exotic_spaces() {
+        assert_eq!(sanitize_filename("a\u{00A0}b\u{3000}c.pdf"), "a b c.pdf");
     }
 
     #[test]
