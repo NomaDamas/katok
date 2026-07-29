@@ -1,6 +1,6 @@
 ---
 name: katok-send
-description: 'Send KakaoTalk messages and images from the CLI on macOS with `katok send`. Opens the target room itself when its window is closed. Text into an open window sends in ~0.2s WITHOUT stealing focus, so the user can keep working; images and room-opening need the screen for ~2s behind a visible curtain that blocks input so the send cannot collide with the user. Native to katok — no third-party binary. Triggers (KR/EN): 카톡 보내줘, 카톡방에 전송, 카톡 발송, 카톡으로 이미지 보내, send a kakao message, kakao send image.'
+description: 'Send KakaoTalk messages and images from the CLI on macOS with `katok send`, matching the writing style sampled from that room history so a message reads as the account owner rather than as a bot. Opens the target room itself when its window is closed. Text into an open window sends in ~0.2s WITHOUT stealing focus, so the user can keep working; images and room-opening need the screen for ~2s behind a visible curtain that blocks input so the send cannot collide with the user. Native to katok — no third-party binary. Triggers (KR/EN): 카톡 보내줘, 카톡방에 전송, 카톡 발송, 카톡으로 이미지 보내, send a kakao message, kakao send image.'
 ---
 
 # katok-send
@@ -22,7 +22,10 @@ katok send --room "<window title>" --dry-run            # resolve and open, send
 
 When the window is closed, katok finds the room in the chat list and opens it. That needs the screen for a moment and so runs behind the curtain described below; a recent room near the top of the list takes about 2s end to end. Once the window is open it stays open, and sending text into it afterwards touches nothing.
 
-- `--room` must match the name shown in the chat list exactly. Confirm it with `--list-rooms`.
+- `--room` accepts either the name the chat list shows or the one the archive
+  stores. A room with no name is titled by listing its members, and the two
+  sources order that list differently (`나윤, 도현` against
+  `도현, 나윤`), so matching is by member set rather than by string.
 - The self-chat window is titled with your own nickname, not "나와의 채팅".
 - `--no-open` fails with exit 1 instead of opening a closed window. Use it for automation that must never disturb the screen.
 - `--dry-run` resolves and opens the room but sends nothing. Use it to verify targeting.
@@ -52,6 +55,39 @@ This exists because the old failure was worse than a failed send. A global keyst
 - **Everything is put back.** The previously active application is reactivated and the clipboard — which the image path has to overwrite, since KakaoTalk exposes no AX affordance for attaching a file — is saved and restored, on every exit path including failures.
 
 Prefer text into an already-open window for unattended automation: it is the only path that touches nothing. Keeping the target room's window open is what makes that the common case.
+
+## Writing in the sender's voice
+
+Before composing anything that will go out under someone's name, read how they
+actually write **in that room**. The archive already holds it; nothing needs to
+be collected or stored in advance.
+
+```sql
+-- their own recent messages in one room
+SELECT text FROM messages
+WHERE chat_id = ? AND sender_id = ? AND message_type = 'text'
+ORDER BY timestamp DESC LIMIT 25;
+```
+
+**Voice is per-room, not per-person, and the difference is large.** Measured on
+one account on one evening, the same person describing the same meal:
+
+| Room | What they actually write |
+|---|---|
+| with a parent-in-law present | `오늘 불고기 된찌 a polite casual ending!` · `우왕 a habitual misspelling!` |
+| one-to-one with a partner | `a spaceless one-liner` · `a plain-speech remark` (avg 10 chars, spaces often dropped) |
+| work group | `a full-sentence status report with @mentions` |
+
+So a single stored "persona" would be wrong in two rooms out of three. Sample the
+target room at composition time instead.
+
+What to take from the sample: sentence endings (`~여` / `~다` / formal), whether
+spaces get dropped, laughter (`ㅋㅋ` vs `ㅎㅎ`), vowel stretching (`너어어무`),
+and typical length — a 140-character paragraph in a room whose average is ten
+reads as someone else typing.
+
+Reuse their own phrases where one fits. Rewriting `a habitual misspelling` as `감사합니다`
+is a correction nobody asked for and it is what makes a message sound generated.
 
 ## Reporting success
 
