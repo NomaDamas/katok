@@ -532,6 +532,20 @@ pub enum SendError {
     RoomOpenFailed(String),
     #[error("could not reach KakaoTalk's chat search box")]
     SearchUnavailable,
+    #[error(
+        "--room contains characters a chat name cannot: {offenders}. This is almost always a \
+         quoting accident in whatever built the argument, not a missing room.\n  room: {room}"
+    )]
+    RoomNameNotTypable { room: String, offenders: String },
+    #[error(
+        "{what} did not hold what was written to it, so the next step would have acted on the \
+         wrong value.\n  wrote: {wrote}\n  found: {found}"
+    )]
+    ValueMismatch {
+        what: String,
+        wrote: String,
+        found: String,
+    },
     #[error("no chat named '{0}' found in the list or by search. Check the exact name with --list-rooms")]
     RoomNotFound(String),
     #[error("image file not found: {0}")]
@@ -782,6 +796,84 @@ fn press_key(pid: i32, key: u16, flags: CGEventFlags) -> Result<(), SendError> {
     Ok(())
 }
 
+/// Reject a room name carrying characters that cannot be in one.
+///
+/// A control character or a zero-width mark in `--room` is almost always a
+/// quoting accident upstream — a stray newline from a shell heredoc, a smart
+/// quote pasted from a document. Searching for it finds nothing, and the run
+/// then reports "no such room", which sends the reader looking at KakaoTalk
+/// instead of at the argument they actually passed. Naming the character is the
+/// difference between a five-minute fix and an afternoon.
+pub fn validate_room_name(room: &str) -> Result<(), SendError> {
+    let bad: Vec<String> = room
+        .chars()
+        .filter(|c| {
+            c.is_control()
+                || matches!(c,
+                    '\u{00AD}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+                    | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+        })
+        .map(|c| format!("U+{:04X}", c as u32))
+        .collect();
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(SendError::RoomNameNotTypable {
+        room: describe_value(room),
+        offenders: bad.join(", "),
+    })
+}
+
+/// Render a string so invisible differences are visible.
+///
+/// A mismatch between what we wrote and what the field holds is often something
+/// that cannot be seen: a stray quote is obvious, a zero-width space or a
+/// newline is not. Printing the codepoints makes every case reportable.
+fn describe_value(text: &str) -> String {
+    let points = text
+        .chars()
+        .map(|c| format!("U+{:04X}", c as u32))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{text:?} [{points}]")
+}
+
+/// Write `text` into `element`'s `AXValue` and prove it arrived unchanged.
+///
+/// Setting an accessibility value is not a promise the app stored what was
+/// sent: it can be reformatted, truncated, appended to whatever was already
+/// there, or quietly rejected. Reading it back is the only way to know, and
+/// without that check a wrong value silently becomes a wrong action — a search
+/// field holding something other than the room name finds the wrong room.
+///
+/// Not usable on a KakaoTalk compose box: writing that sends immediately, so
+/// the field is empty by the time it could be read.
+fn set_value_verified(element: AXUIElementRef, text: &str, what: &str) -> Result<(), SendError> {
+    let key = CFString::new(ATTR_VALUE);
+    let value = CFString::new(text);
+    let err = unsafe {
+        AXUIElementSetAttributeValue(element, key.as_concrete_TypeRef(), value.as_CFTypeRef())
+    };
+    if err != AX_SUCCESS {
+        return Err(SendError::SetValueFailed(err));
+    }
+    // A field can take a moment to settle, so give it a few reads before
+    // calling it a mismatch.
+    let mut actual = String::new();
+    for _ in 0..10 {
+        actual = attr_string(element, ATTR_VALUE).unwrap_or_default();
+        if actual == text {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    Err(SendError::ValueMismatch {
+        what: what.to_string(),
+        wrote: describe_value(text),
+        found: describe_value(&actual),
+    })
+}
+
 /// Depth-limited search for the first descendant matching `role`.
 fn find_descendant(el: AXUIElementRef, role: &str, depth: u32) -> Option<AxRef> {
     if depth == 0 {
@@ -837,6 +929,7 @@ pub fn send_image_to_open_window(
     allow_open: bool,
     ctx: &SendContext,
 ) -> Result<(), SendError> {
+    validate_room_name(room)?;
     if !unsafe { AXIsProcessTrusted() } {
         return Err(SendError::AccessibilityDenied);
     }
@@ -1259,18 +1352,9 @@ fn open_room_via_search(
     let main = main_window(windows).ok_or(SendError::ChatListUnavailable)?;
     let field = search_field(main.as_raw()).ok_or(SendError::SearchUnavailable)?;
 
-    let key = CFString::new(ATTR_VALUE);
-    let value = CFString::new(room);
-    let err = unsafe {
-        AXUIElementSetAttributeValue(
-            field.as_raw(),
-            key.as_concrete_TypeRef(),
-            value.as_CFTypeRef(),
-        )
-    };
-    if err != AX_SUCCESS {
-        return Err(SendError::SearchUnavailable);
-    }
+    // Verified rather than fire-and-forget: whatever ends up in this box is what
+    // decides which conversation gets opened.
+    set_value_verified(field.as_raw(), room, "the chat search box")?;
 
     // Results replace the chat-list rows. Wait for a row that actually reads back
     // as the requested room.
@@ -1483,6 +1567,7 @@ pub fn send_to_open_window(
     allow_open: bool,
     ctx: &SendContext,
 ) -> Result<(), SendError> {
+    validate_room_name(room)?;
     if !unsafe { AXIsProcessTrusted() } {
         return Err(SendError::AccessibilityDenied);
     }
@@ -1571,6 +1656,7 @@ pub fn resolve_room_window(
     allow_open: bool,
     ctx: &SendContext,
 ) -> Result<(), SendError> {
+    validate_room_name(room)?;
     if !unsafe { AXIsProcessTrusted() } {
         return Err(SendError::AccessibilityDenied);
     }
