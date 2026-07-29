@@ -1193,8 +1193,9 @@ fn open_row_by_click(
     front_then(pid, || -> Result<(), SendError> {
         for click in 1..=2 {
             for kind in [CGEventType::LeftMouseDown, CGEventType::LeftMouseUp] {
-                let ev = CGEvent::new_mouse_event(source.clone(), kind, target, CGMouseButton::Left)
-                    .map_err(|_| SendError::KeyEventFailed)?;
+                let ev =
+                    CGEvent::new_mouse_event(source.clone(), kind, target, CGMouseButton::Left)
+                        .map_err(|_| SendError::KeyEventFailed)?;
                 ev.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click);
                 tag_synthetic(&ev);
                 ev.post(CGEventTapLocation::HID);
@@ -1271,16 +1272,21 @@ fn open_room_via_search(
         return Err(SendError::SearchUnavailable);
     }
 
-    // Results replace the chat-list rows. Prefer an exact name match, but accept a lone result:
-    // the query was the full room name, and under rapid access KakaoTalk sometimes hands back a
-    // row whose cell text has not been filled in yet, which would otherwise fail a name compare
-    // on the very row the user asked for.
+    // Results replace the chat-list rows. Wait for a row that actually reads back
+    // as the requested room.
+    //
+    // There used to be a fallback here that clicked a lone result without
+    // checking its name, on the reasoning that KakaoTalk sometimes hands back a
+    // row whose cell text has not been filled in yet. That is precisely the
+    // blind click that opened the wrong conversation, so an unreadable row is
+    // now something to wait through rather than to act on: the filter is
+    // already applied, so the name appearing is a matter of a few more frames.
     let full_list = chat_list_table_in(main.as_raw())
         .map(|t| child_elements(t.as_raw(), ATTR_ROWS).len())
         .ok_or(SendError::ChatListUnavailable)?;
 
     for _ in 0..25 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(100));
         let Some(table) = chat_list_table_in(main.as_raw()) else {
             continue;
         };
@@ -1293,9 +1299,6 @@ fn open_room_via_search(
             .find(|r| row_room_name(r.as_raw()).as_deref() == Some(room))
         {
             return open_row_by_click(app, windows, hit.as_raw(), room, pid);
-        }
-        if rows.len() == 1 {
-            return open_row_by_click(app, windows, rows[0].as_raw(), room, pid);
         }
     }
     Err(SendError::RoomNotFound(room.to_string()))
@@ -1373,9 +1376,10 @@ fn resolve_window(
         });
     }
 
-    // Two strategies, tried cheapest-first and both reported on failure — never silently.
-    // The row scan only sees rows KakaoTalk has already rendered, so search is the route to
-    // anything further down the list, and a full scan is the last resort.
+    // Three strategies, every failure reported — never silently. Search leads
+    // because it is the only one that cannot click the wrong room; the row scans
+    // behind it cover the case where the search field is unreachable, and only
+    // see rows KakaoTalk has already rendered.
     //
     // Taking focus is a one-off per room: once the window is open, sending into it stays in
     // the background.
@@ -1400,9 +1404,18 @@ fn resolve_window(
             drop(hold);
             return Err(SendError::Cancelled);
         }
+        // Search first, even though scanning the visible rows is cheaper.
+        //
+        // A row is opened by double-clicking its screen coordinates, and the
+        // chat list reorders the instant any of nearly three hundred rooms
+        // receives a message — so between reading a row's position and clicking
+        // it, that position can belong to someone else. Measured: aiming at one
+        // room opened another. Filtering the list down to the single matching
+        // row removes the race rather than narrowing it, because there is
+        // nothing left to reorder.
         let outcome = match attempt {
-            0 => open_room_from_chat_list(app, &windows, room, RECENT_ROWS, pid),
-            1 => open_room_via_search(app, &windows, room, pid),
+            0 => open_room_via_search(app, &windows, room, pid),
+            1 => open_room_from_chat_list(app, &windows, room, RECENT_ROWS, pid),
             _ => open_room_from_chat_list(app, &windows, room, usize::MAX, pid),
         };
         match outcome {
@@ -1417,7 +1430,7 @@ fn resolve_window(
             },
             Err(e) => last = Some(e),
         }
-        if attempt == 1 {
+        if attempt == 0 {
             clear_search(&windows);
         }
     }
