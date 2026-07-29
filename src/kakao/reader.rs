@@ -267,12 +267,18 @@ fn load_users(conn: &Connection) -> Result<HashMap<i64, String>> {
     Ok(users)
 }
 
-/// Best-effort: parse `supplement` JSON for a referenced parent `logId` in the
-/// same chat. Only the JSON structure is inspected, never message bodies.
+/// Best-effort: parse an attachment/supplement JSON blob for a referenced
+/// parent `logId` in the same chat. Only the JSON structure is inspected, never
+/// message bodies.
 ///
-/// `supplement` is present on ~64% of messages (media/attachment/link-preview
-/// metadata, not just replies), so this is deliberately conservative to avoid
-/// synthesizing false reply edges:
+/// Callers pass the `attachment` column first. A KakaoTalk reply (`type` 26)
+/// stores `src_logId` at the top level of `attachment`, and measurements on a
+/// live install found 6891 of 6891 replies shaped that way with **zero** in
+/// `supplement` — so a reader that consulted only `supplement`, as this one once
+/// did, resolved no replies at all while its unit tests stayed green.
+///
+/// Both columns carry metadata for non-reply reasons too, so this stays
+/// deliberately conservative to avoid synthesizing false reply edges:
 ///   * only reply-specific keys are accepted (the bare generic `logId` is NOT,
 ///     since media supplements legitimately embed it for non-reply reasons);
 ///   * those keys are looked up directly on the top-level object and, by
@@ -351,7 +357,7 @@ fn read_one(
 
     let mut stmt = conn
         .prepare(
-            "SELECT chatId, logId, authorId, type, message, sentAt, supplement
+            "SELECT chatId, logId, authorId, type, message, sentAt, supplement, attachment
              FROM NTChatMessage
              WHERE message IS NOT NULL AND message <> ''",
         )
@@ -370,8 +376,9 @@ fn read_one(
             // sentAt is epoch seconds; tolerate a float column by reading f64.
             let sent_at: f64 = row.get::<_, f64>(5).unwrap_or(0.0);
             let supplement: Option<String> = row.get(6)?;
+            let attachment: Option<String> = row.get(7)?;
             Ok((
-                chat_id, log_id, author_id, msg_type, text, sent_at, supplement,
+                chat_id, log_id, author_id, msg_type, text, sent_at, supplement, attachment,
             ))
         })
         .map_err(Error::Sql)?;
@@ -381,13 +388,14 @@ fn read_one(
     // otherwise-healthy read. Row content is never logged.
     let mut skipped_rows: usize = 0;
     for row in rows {
-        let (chat_id, log_id, author_id, msg_type, text, sent_at, supplement) = match row {
-            Ok(values) => values,
-            Err(_) => {
-                skipped_rows += 1;
-                continue;
-            }
-        };
+        let (chat_id, log_id, author_id, msg_type, text, sent_at, supplement, attachment) =
+            match row {
+                Ok(values) => values,
+                Err(_) => {
+                    skipped_rows += 1;
+                    continue;
+                }
+            };
 
         let room = rooms.get(&chat_id);
         let chat_type = room
@@ -425,7 +433,11 @@ fn read_one(
             format!("type_{msg_type}")
         };
 
-        let reply_to_message_id = reply_parent_log_id(supplement.as_deref())
+        // `attachment` first: on a real install every reply carries its
+        // `src_logId` there and none carry it in `supplement`, so checking only
+        // the latter found nothing at all.
+        let reply_to_message_id = reply_parent_log_id(attachment.as_deref())
+            .or_else(|| reply_parent_log_id(supplement.as_deref()))
             .filter(|parent| *parent != log_id)
             .map(|parent| format!("{chat_id}-{parent}"));
 

@@ -164,6 +164,47 @@ fn assert_archive_invariants(conn: &Connection, expected_messages: i64) {
         )
         .expect("orphan parent_chunk_children");
     assert_eq!(orphan_pc, 0, "orphan parent_chunk_children");
+
+    // The reference tables were not checked here, which is why a scoped rebuild
+    // could leave `chunk_parent_refs` and `reply_edges` pointing at chunk ids it
+    // had just deleted while the whole suite stayed green.
+    for (label, sql) in [
+        (
+            "orphan parent_chunk_children -> chunks",
+            "SELECT COUNT(*) FROM parent_chunk_children pcc
+             LEFT JOIN chunks c ON c.chunk_id = pcc.chunk_id
+             WHERE c.chunk_id IS NULL",
+        ),
+        (
+            "dangling chunk_parent_refs.child_chunk_id",
+            "SELECT COUNT(*) FROM chunk_parent_refs r
+             LEFT JOIN chunks c ON c.chunk_id = r.child_chunk_id
+             WHERE c.chunk_id IS NULL",
+        ),
+        (
+            "dangling chunk_parent_refs.parent_chunk_id",
+            "SELECT COUNT(*) FROM chunk_parent_refs r
+             LEFT JOIN chunks c ON c.chunk_id = r.parent_chunk_id
+             WHERE c.chunk_id IS NULL",
+        ),
+        (
+            "dangling reply_edges.child_chunk_id",
+            "SELECT COUNT(*) FROM reply_edges e
+             LEFT JOIN chunks c ON c.chunk_id = e.child_chunk_id
+             WHERE e.child_chunk_id IS NOT NULL AND c.chunk_id IS NULL",
+        ),
+        (
+            "dangling reply_edges.parent_chunk_id",
+            "SELECT COUNT(*) FROM reply_edges e
+             LEFT JOIN chunks c ON c.chunk_id = e.parent_chunk_id
+             WHERE e.parent_chunk_id IS NOT NULL AND c.chunk_id IS NULL",
+        ),
+    ] {
+        let count: i64 = conn
+            .query_row(sql, [], |row| row.get(0))
+            .unwrap_or_else(|err| panic!("{label}: {err}"));
+        assert_eq!(count, 0, "{label}");
+    }
 }
 
 fn raw(
@@ -317,7 +358,8 @@ fn rebuilding_one_chat_leaves_the_other_chats_untouched() {
     rebuild_chunks(&archive).expect("full rebuild");
 
     let before = snapshot(archive.connection());
-    rebuild_chunks_for_chats(&archive, settings(), &[whole_chat(&chats[0])]).expect("scoped rebuild");
+    rebuild_chunks_for_chats(&archive, settings(), &[whole_chat(&chats[0])])
+        .expect("scoped rebuild");
     let after = snapshot(archive.connection());
 
     assert_eq!(
@@ -581,7 +623,10 @@ fn cutting_at_the_last_parent_window_reproduces_the_full_rebuild_tail() {
         .connection()
         .query_row("SELECT COUNT(*) FROM parent_chunks", [], |row| row.get(0))
         .expect("count windows");
-    assert_eq!(window_count, 2, "fixture must form exactly two parent windows");
+    assert_eq!(
+        window_count, 2,
+        "fixture must form exactly two parent windows"
+    );
     let before_cut = tail_snapshot(full.connection(), None).len()
         - tail_snapshot(full.connection(), Some(&threshold)).len();
     assert!(before_cut > 0, "fixture must have artifacts before the cut");
@@ -694,9 +739,11 @@ fn a_char_limit_split_window_is_recomputed_and_matches_a_full_rebuild() {
 
     let window_count: i64 = full
         .connection()
-        .query_row("SELECT COUNT(*) FROM parent_chunks WHERE chat_id = 'C'", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM parent_chunks WHERE chat_id = 'C'",
+            [],
+            |row| row.get(0),
+        )
         .expect("count windows");
     assert!(
         window_count >= 3,
@@ -705,9 +752,7 @@ fn a_char_limit_split_window_is_recomputed_and_matches_a_full_rebuild() {
 
     let staged_dir = tempfile::tempdir().expect("tempdir");
     let staged = Archive::open(&staged_dir.path().join("archive.sqlite3")).expect("open archive");
-    let seed = staged
-        .sync_messages(&messages[..last])
-        .expect("sync seed");
+    let seed = staged.sync_messages(&messages[..last]).expect("sync seed");
     rebuild_chunks_for_chats(&staged, settings(), &seed.touched_chats).expect("seed rebuild");
     let wave = staged
         .sync_messages(&messages[last..])
@@ -753,7 +798,10 @@ fn an_in_place_nickname_change_widens_the_cut_and_matches_a_full_rebuild() {
     rebuild_chunks(&full).expect("ground-truth full rebuild");
 
     let staged_report = staged.sync_messages(&change).expect("sync change staged");
-    assert_eq!(staged_report.updated_messages, 1, "nickname change must count as updated");
+    assert_eq!(
+        staged_report.updated_messages, 1,
+        "nickname change must count as updated"
+    );
     let cut = staged
         .tail_rebuild_start(
             "G",
@@ -779,10 +827,7 @@ fn an_in_place_nickname_change_widens_the_cut_and_matches_a_full_rebuild() {
     rebuild_chunks(&full).expect("full after mid");
     let staged_mid = staged.sync_messages(&mid).expect("sync mid staged");
     let mid_cut = staged
-        .tail_rebuild_start(
-            "G",
-            &staged_mid.touched_chats[0].earliest_changed_timestamp,
-        )
+        .tail_rebuild_start("G", &staged_mid.touched_chats[0].earliest_changed_timestamp)
         .expect("resolve mid cut");
     assert_eq!(
         mid_cut,
@@ -836,7 +881,9 @@ fn a_backfill_between_bursts_with_a_cross_chunk_reply_matches_a_full_rebuild() {
 
     let parent_refs: i64 = full
         .connection()
-        .query_row("SELECT COUNT(*) FROM chunk_parent_refs", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM chunk_parent_refs", [], |row| {
+            row.get(0)
+        })
         .expect("count parent refs");
     assert!(
         parent_refs > 0,
@@ -1038,7 +1085,8 @@ fn a_large_single_room_tail_matches_a_full_rebuild_and_cost_tracks_new_messages(
         .sync_messages(&messages[..messages.len() - 1])
         .expect("sync large seed");
     let whole_started = std::time::Instant::now();
-    rebuild_chunks_for_chats(&large, settings(), &[whole_chat("L")]).expect("seed whole-chat rebuild");
+    rebuild_chunks_for_chats(&large, settings(), &[whole_chat("L")])
+        .expect("seed whole-chat rebuild");
     let whole_seed_ms = whole_started.elapsed().as_millis();
 
     let cut = messages[last_burst_start].timestamp.to_rfc3339();
@@ -1079,9 +1127,14 @@ fn a_large_single_room_tail_matches_a_full_rebuild_and_cost_tracks_new_messages(
     assert_archive_invariants(large.connection(), messages.len() as i64);
     let parent_refs: i64 = large
         .connection()
-        .query_row("SELECT COUNT(*) FROM chunk_parent_refs", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM chunk_parent_refs", [], |row| {
+            row.get(0)
+        })
         .expect("count parent refs");
-    assert!(parent_refs > 0, "large fixture must keep non-empty chunk_parent_refs");
+    assert!(
+        parent_refs > 0,
+        "large fixture must keep non-empty chunk_parent_refs"
+    );
 
     // Residual decomposition: full-archive ref rebuild alone (the pre-scope baseline). Scoped
     // sync no longer pays this; it rebuilds refs only for the touched chats.
@@ -1292,7 +1345,8 @@ fn scanned_tables(plan: &str) -> Vec<&str> {
 }
 
 /// The indexes whose whole point is to carry the `started_at` floor as well as the chat.
-const TIME_ORDERED_INDEXES: &[&str] = &["idx_chunks_chat_started", "idx_parent_chunks_chat_started"];
+const TIME_ORDERED_INDEXES: &[&str] =
+    &["idx_chunks_chat_started", "idx_parent_chunks_chat_started"];
 
 /// Whether every plan step that reaches for a time-ordered index also bounds `started_at`.
 ///
@@ -1368,8 +1422,14 @@ fn an_archive_built_before_the_indexes_existed_picks_them_up_when_it_is_reopened
     drop(archive);
 
     let reopened = Archive::open(&path).expect("reopen archive");
-    assert_no_chunk_table_scans(reopened.connection(), "archive reopened after the indexes existed");
-    assert_no_ref_table_scans(reopened.connection(), "archive reopened after the indexes existed");
+    assert_no_chunk_table_scans(
+        reopened.connection(),
+        "archive reopened after the indexes existed",
+    );
+    assert_no_ref_table_scans(
+        reopened.connection(),
+        "archive reopened after the indexes existed",
+    );
     assert_eq!(
         before,
         snapshot(reopened.connection()),
@@ -1379,7 +1439,12 @@ fn an_archive_built_before_the_indexes_existed_picks_them_up_when_it_is_reopened
 
 /// Tables a scoped ref rebuild must not whole-scan. `chunks_fts` is irrelevant here; the four
 /// statements only touch `reply_edges`, `messages`, `chunk_messages`, and `chunk_parent_refs`.
-const REF_MUST_NOT_SCAN: &[&str] = &["reply_edges", "messages", "chunk_messages", "chunk_parent_refs"];
+const REF_MUST_NOT_SCAN: &[&str] = &[
+    "reply_edges",
+    "messages",
+    "chunk_messages",
+    "chunk_parent_refs",
+];
 
 fn assert_no_ref_table_scans(conn: &Connection, context: &str) {
     for sql in SCOPED_REF_REBUILD_STATEMENTS {
@@ -1515,7 +1580,10 @@ fn the_sargable_floor_selects_the_same_rows_as_the_or_form() {
         .expect("query")
         .collect::<std::result::Result<Vec<_>, _>>()
         .expect("timestamps");
-    assert!(timestamps.len() >= 2, "fixture chat needs at least two messages");
+    assert!(
+        timestamps.len() >= 2,
+        "fixture chat needs at least two messages"
+    );
 
     let or_form = "SELECT account_hash, chat_id, chat_name, chat_type, message_id,
             sender_nickname, timestamp, text, message_type
@@ -1559,7 +1627,8 @@ fn a_per_chat_ref_rebuild_matches_a_full_ref_rebuild_and_edges_stay_intra_chat()
     // Mint format `{chat_id}-{log_id}` so the prefix invariant is directly assertable. Gaps keep
     // each sender turn as its own chunk so cross-chunk replies populate chunk_parent_refs.
     let mut messages = Vec::new();
-    for (chat, nick_a, nick_b) in [("roomA", "보글이", "부리"), ("roomB", "하울", "새미")] {
+    for (chat, nick_a, nick_b) in [("roomA", "보글이", "부리"), ("roomB", "하울", "새미")]
+    {
         for i in 0..4 {
             let nick = if i % 2 == 0 { nick_a } else { nick_b };
             let log = i + 1;
@@ -1579,14 +1648,7 @@ fn a_per_chat_ref_rebuild_matches_a_full_ref_rebuild_and_edges_stay_intra_chat()
         }
     }
     // Untouched third room: must keep its edges when only roomA is ref-rebuilt.
-    messages.push(raw(
-        "roomC",
-        "roomC-1",
-        "민지",
-        base,
-        "조용한 방",
-        None,
-    ));
+    messages.push(raw("roomC", "roomC-1", "민지", base, "조용한 방", None));
     messages.push(raw(
         "roomC",
         "roomC-2",
@@ -1607,7 +1669,9 @@ fn a_per_chat_ref_rebuild_matches_a_full_ref_rebuild_and_edges_stay_intra_chat()
         .expect("count reply_edges");
     let parent_refs: i64 = full
         .connection()
-        .query_row("SELECT COUNT(*) FROM chunk_parent_refs", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM chunk_parent_refs", [], |row| {
+            row.get(0)
+        })
         .expect("count parent refs");
     assert!(
         reply_edges >= 3,
@@ -1706,7 +1770,10 @@ fn a_per_chat_ref_rebuild_matches_a_full_ref_rebuild_and_edges_stay_intra_chat()
             |row| row.get(0),
         )
         .expect("count B");
-    assert!(edges_before_b > 0, "roomB edges must survive roomA corruption");
+    assert!(
+        edges_before_b > 0,
+        "roomB edges must survive roomA corruption"
+    );
     scoped
         .rebuild_reply_and_parent_refs_for_chats(&["roomA"])
         .expect("rebuild roomA only");
@@ -1810,4 +1877,42 @@ fn a_null_floor_deletes_the_same_chunk_rows_the_or_form_did() {
             }
         }
     }
+}
+
+/// A wall of identical long messages must not collide two parent windows onto
+/// one `parent_id`.
+///
+/// Nine consecutive 999-character messages from the same sender fill one chunk
+/// whose parent line is cut into segments with identical text, identical first
+/// child and identical last child. Before the segment ordinal became part of the
+/// hash they produced the same id, the insert violated the primary key, and
+/// because a sync is one transaction it rolled the whole thing back — leaving an
+/// archive that failed on the same messages on every later run. Pasting a log or
+/// a long article into a chat is enough to trigger it.
+#[test]
+fn repeated_long_messages_do_not_collide_parent_ids() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = Archive::open(&dir.path().join("archive.sqlite3")).expect("open archive");
+
+    let body = "가".repeat(999);
+    let base = chrono::Utc::now();
+    let messages: Vec<RawMessage> = (0..9)
+        .map(|i| {
+            raw(
+                "chat-repeat",
+                &format!("m{i}"),
+                "Alice",
+                base + chrono::Duration::seconds(i),
+                &body,
+                None,
+            )
+        })
+        .collect();
+
+    archive.sync_messages(&messages).expect("sync");
+    rebuild_chunks_with_settings(&archive, ChunkSettings::default())
+        .expect("rebuild must not hit a UNIQUE violation on parent_chunks");
+
+    let conn = Connection::open(dir.path().join("archive.sqlite3")).expect("open for asserts");
+    assert_archive_invariants(&conn, messages.len() as i64);
 }

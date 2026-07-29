@@ -34,7 +34,12 @@ impl Default for ChunkSettings {
 ///
 /// Covers `should_start_new_chunk`, `should_start_parent_window`, the parent-window size limits,
 /// and the `stable_chunk_id` salt.
-pub const CHUNKER_VERSION: i64 = 1;
+/// Bump whenever chunk or parent-window derivation changes, which forces a full
+/// rebuild on the next sync so existing archives cannot keep stale ids.
+///
+/// 2: `parent_id` now includes the segment ordinal (see `parent.rs`), so parents
+/// cut from one oversized chunk stop colliding.
+pub const CHUNKER_VERSION: i64 = 2;
 
 pub fn rebuild_chunks(archive: &Archive) -> Result<usize> {
     rebuild_chunks_with_settings(archive, ChunkSettings::default())

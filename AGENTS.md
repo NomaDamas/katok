@@ -29,8 +29,12 @@ send path, and the input-blocking curtain only exist against the running app. Th
 rule above forbids automated tests that depend on a real install; it does not
 forbid verifying by hand. When doing so:
 
-- Never print message text, room names, real names, or phone numbers into the
-  session. Report counts, ids, hashes, and status instead.
+- Verify with counts, ids, hashes, and status rather than by dumping rows.
+  Showing someone their own conversation is what this tool is *for* — a
+  transcript or a search result asked for by the user is the product working,
+  not a leak. The thing to avoid is incidental exposure: pasting raw query
+  output into a session while debugging something unrelated, where the content
+  was never what anyone asked to see.
 - Sending is not reversible and it reaches other people. Do not choose a room to
   test against on your own initiative — ask, and treat any standing permission as
   covering only the rooms actually named.
