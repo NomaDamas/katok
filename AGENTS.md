@@ -22,6 +22,21 @@ Kakao Memory is a local-first semantic memory and search layer for KakaoTalk con
 - Real KakaoTalk smoke tests may be manual-only and must avoid printing private content.
 - Keep README, CLI help, and privacy behavior aligned in the same change.
 
+## Manual Verification Against a Real Install
+
+Some of this crate cannot be checked any other way: decryption, the Accessibility
+send path, and the input-blocking curtain only exist against the running app. The
+rule above forbids automated tests that depend on a real install; it does not
+forbid verifying by hand. When doing so:
+
+- Never print message text, room names, real names, or phone numbers into the
+  session. Report counts, ids, hashes, and status instead.
+- Sending is not reversible and it reaches other people. Do not choose a room to
+  test against on your own initiative — ask, and treat any standing permission as
+  covering only the rooms actually named.
+- Opening a room window notifies nobody, so prefer `--dry-run` when only the
+  targeting needs proving.
+
 ## Repository Hygiene
 
 - Generated archives, indexes, embedding caches, auth caches, logs, and local test output belong in ignored paths.
