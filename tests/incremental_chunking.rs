@@ -2097,3 +2097,112 @@ fn a_scoped_rebuild_restores_a_cross_chat_reply_ref() {
     let conn = Connection::open(scoped_dir.path().join("archive.sqlite3")).expect("open");
     assert_archive_invariants(&conn, messages.len() as i64);
 }
+
+/// Reconciliation removes a message the source dropped, and refuses to touch
+/// history the source can no longer reach.
+///
+/// KakaoTalk prunes its own database, and outliving that is the reason this
+/// archive exists — so "absent from the source" cannot mean "delete". Only the
+/// span the source still reports is reconciled.
+#[test]
+fn reconciliation_deletes_inside_the_source_window_and_never_outside_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = Archive::open(&dir.path().join("archive.sqlite3")).expect("open archive");
+    let at = chrono::Utc::now();
+
+    let seeded = vec![
+        raw("chat-x", "old", "Alice", at, "예전 기록", None),
+        raw(
+            "chat-x",
+            "mid",
+            "Alice",
+            at + chrono::Duration::hours(1),
+            "지워질 것",
+            None,
+        ),
+        raw(
+            "chat-x",
+            "new",
+            "Alice",
+            at + chrono::Duration::hours(2),
+            "남을 것",
+            None,
+        ),
+        raw(
+            "chat-y",
+            "y1",
+            "Bob",
+            at + chrono::Duration::hours(1),
+            "다른 방",
+            None,
+        ),
+    ];
+    archive.sync_messages(&seeded).expect("seed");
+
+    // The source has forgotten `old` entirely (its window now starts at `mid`'s
+    // hour) and the user deleted `mid`. Chat-y is not mentioned at all.
+    let source = vec![raw(
+        "chat-x",
+        "new",
+        "Alice",
+        at + chrono::Duration::hours(2),
+        "남을 것",
+        None,
+    )];
+
+    let preview = archive
+        .reconcile_deletions(&source, false)
+        .expect("preview");
+    assert!(
+        preview.is_empty(),
+        "a single-message window deletes nothing"
+    );
+
+    // Widen the source window to cover `mid` while still omitting it.
+    let source = vec![
+        raw(
+            "chat-x",
+            "mid2",
+            "Alice",
+            at + chrono::Duration::minutes(30),
+            "새 메시지",
+            None,
+        ),
+        raw(
+            "chat-x",
+            "new",
+            "Alice",
+            at + chrono::Duration::hours(2),
+            "남을 것",
+            None,
+        ),
+    ];
+    let doomed = archive
+        .reconcile_deletions(&source, false)
+        .expect("preview");
+    let ids: Vec<&str> = doomed.iter().map(|d| d.message_id.as_str()).collect();
+    assert_eq!(ids, vec!["mid"], "only the in-window absentee, got {ids:?}");
+
+    // A preview must not have changed anything.
+    assert_eq!(archive.raw_messages().expect("read").len(), 4);
+
+    archive.reconcile_deletions(&source, true).expect("apply");
+    let remaining: Vec<String> = archive
+        .raw_messages()
+        .expect("read")
+        .into_iter()
+        .map(|m| m.message_id)
+        .collect();
+    assert!(
+        remaining.contains(&"old".to_string()),
+        "pruned history must survive"
+    );
+    assert!(
+        remaining.contains(&"y1".to_string()),
+        "an unmentioned chat is untouched"
+    );
+    assert!(
+        !remaining.contains(&"mid".to_string()),
+        "the deleted message must go"
+    );
+}

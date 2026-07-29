@@ -26,6 +26,18 @@ pub(crate) enum Commands {
         path: Option<PathBuf>,
         #[arg(long)]
         json: bool,
+        /// Report messages the source no longer has, without deleting anything.
+        ///
+        /// Only the time range the source still covers is considered, so history
+        /// KakaoTalk has since pruned is never listed.
+        #[arg(long)]
+        prune_preview: bool,
+        /// Actually delete what `--prune-preview` reports.
+        ///
+        /// This is the only command that removes archived messages. Preview
+        /// first; a deletion cannot be undone from within katok.
+        #[arg(long, conflicts_with = "prune_preview")]
+        prune_deleted: bool,
         /// Include per-chat earliest-change keys (`touched_chats`) in the report.
         ///
         /// Opt-in: without this flag the JSON shape matches historical consumers exactly.

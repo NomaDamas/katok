@@ -1,3 +1,4 @@
+use super::model::DeletedMessage;
 use super::{Archive, ChunkDraft, ParentChunkDraft};
 use crate::{
     types::{RawMessage, SyncReport, TouchedChat},
@@ -595,6 +596,88 @@ impl Archive {
             )
             .map_err(Error::Sql)?;
         Ok(())
+    }
+
+    /// Remove archived messages the source no longer has, within the range the
+    /// source actually covers.
+    ///
+    /// Sync otherwise only ever upserts, so a message deleted or redacted
+    /// upstream stays in the archive, in its chunk text, in `chunks_fts` and in
+    /// the embedded parent window forever. For a tool whose subject matter is
+    /// private conversation that is a privacy defect, not staleness.
+    ///
+    /// **The window is the whole safety story.** KakaoTalk prunes its own
+    /// database over time, and outliving that is precisely why this archive
+    /// exists — so "absent from the source" cannot mean "delete". A message is
+    /// removed only when it falls *inside* the `[oldest, newest]` span the
+    /// source still reports for that chat and is missing from it. Anything older
+    /// than the source's reach is history the source has forgotten and this
+    /// archive is keeping, and it is never touched.
+    ///
+    /// Two further guards: a chat the source did not mention at all is skipped
+    /// entirely (an empty or partial read must not read as a mass deletion), and
+    /// the caller decides whether to apply or only report.
+    pub fn reconcile_deletions(
+        &self,
+        source: &[RawMessage],
+        apply: bool,
+    ) -> Result<Vec<DeletedMessage>> {
+        use std::collections::{HashMap, HashSet};
+
+        let mut spans: HashMap<&str, (String, String)> = HashMap::new();
+        let mut present: HashSet<(&str, &str)> = HashSet::new();
+        for message in source {
+            let ts = message.timestamp.to_rfc3339();
+            spans
+                .entry(message.chat_id.as_str())
+                .and_modify(|(oldest, newest)| {
+                    if ts < *oldest {
+                        oldest.clone_from(&ts);
+                    }
+                    if ts > *newest {
+                        newest.clone_from(&ts);
+                    }
+                })
+                .or_insert_with(|| (ts.clone(), ts.clone()));
+            present.insert((message.chat_id.as_str(), message.message_id.as_str()));
+        }
+
+        let mut doomed = Vec::new();
+        for (chat_id, (oldest, newest)) in &spans {
+            let mut stmt = self
+                .conn
+                .prepare_cached(
+                    "SELECT message_id FROM messages
+                     WHERE chat_id = ?1 AND timestamp >= ?2 AND timestamp <= ?3",
+                )
+                .map_err(Error::Sql)?;
+            let rows = stmt
+                .query_map(params![chat_id, oldest, newest], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(Error::Sql)?;
+            for row in rows {
+                let message_id = row.map_err(Error::Sql)?;
+                if !present.contains(&(chat_id, message_id.as_str())) {
+                    doomed.push(DeletedMessage {
+                        chat_id: (*chat_id).to_string(),
+                        message_id,
+                    });
+                }
+            }
+        }
+
+        if apply {
+            for victim in &doomed {
+                self.conn
+                    .execute(
+                        "DELETE FROM messages WHERE chat_id = ?1 AND message_id = ?2",
+                        params![victim.chat_id, victim.message_id],
+                    )
+                    .map_err(Error::Sql)?;
+            }
+        }
+        Ok(doomed)
     }
 
     fn rebuild_parent_refs_for_chat(&self, chat_id: &str) -> Result<()> {

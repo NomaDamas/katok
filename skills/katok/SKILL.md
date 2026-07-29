@@ -88,6 +88,21 @@ Sync is cheap enough to run often: on a 400k-message archive a quiet sync takes 
 - `katok chunk get --redact` masks the entire `text`, not only the PII inside it. Use it for a line you must quote, not for a readable export.
 - KakaoTalk system feed entries (invite, join, leave) arrive as JSON strings such as `{"inviter":...}` or `{"member":...,"feedType":N}`. Filter them out of anything a person will read.
 
+## Deleted Messages
+
+Sync only upserts, so a message removed upstream stays in the archive unless it
+is reconciled away:
+
+```
+katok sync --prune-preview --json   # what the source no longer has; deletes nothing
+katok sync --prune-deleted --json   # actually remove it
+```
+
+Only the time range the source still reports for a chat is considered. KakaoTalk
+prunes its own database and outliving that is the reason this archive exists, so
+messages older than the source's reach are kept, and a chat the source did not
+mention at all is skipped. Preview before deleting — katok cannot undo it.
+
 ## Media Attachments
 
 `katok media get --chat <chat-id> --out <dir>` resolves each media message through four tiers in order: the decrypted local cache, a GET of the attachment's own presigned CDN URL verified by SHA-1, the decrypted `.thm` thumbnail, and finally a metadata stub. That CDN GET is the only network access anywhere in the CLI, and `--no-cdn` disables it so resolution stays entirely local.

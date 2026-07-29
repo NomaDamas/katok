@@ -44,6 +44,8 @@ pub(crate) fn run(
             path,
             json,
             touched,
+            prune_preview,
+            prune_deleted,
         } => {
             let source = source.unwrap_or_else(|| config.source_adapter.clone());
             run_sync(
@@ -51,6 +53,8 @@ pub(crate) fn run(
                 path,
                 json,
                 touched,
+                prune_preview,
+                prune_deleted,
                 &config,
                 &archive_path,
                 &data_dir,
@@ -297,11 +301,14 @@ fn macos_probe_payload(enabled: bool, data_dir: &Path) -> serde_json::Value {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_sync(
     source: &str,
     path: Option<PathBuf>,
     json: bool,
     include_touched: bool,
+    prune_preview: bool,
+    prune_deleted: bool,
     config: &KatokConfig,
     archive_path: &Path,
     data_dir: &Path,
@@ -313,10 +320,42 @@ fn run_sync(
     let archive = Archive::open(archive_path).context("open archive")?;
     // Message upserts and the chunk rebuild are one unit: chunks derived from half-written
     // messages are not a usable archive state, so either both land or neither does.
-    let mut report = archive.in_transaction(|| {
+    let report = archive.in_transaction(|| {
         let upsert_started = Instant::now();
         let mut report = archive.sync_messages(&messages).context("sync messages")?;
         let upsert_messages = upsert_started.elapsed().as_millis();
+
+        // Before chunking, so a removed message never reaches a chunk. Inside
+        // the same transaction, so a failure anywhere leaves nothing deleted.
+        let pruned = if prune_preview || prune_deleted {
+            let doomed = archive
+                .reconcile_deletions(&messages, prune_deleted)
+                .context("reconcile deletions")?;
+            if prune_deleted {
+                // Their chats have to be rechunked for the removal to reach the
+                // chunk text and the index, not just the messages table.
+                for chat_id in doomed
+                    .iter()
+                    .map(|d| d.chat_id.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+                {
+                    if !report.touched_chats.iter().any(|c| c.chat_id == chat_id) {
+                        // Empty means "no floor", so the chat rebuilds whole.
+                        // A deletion has no surviving row to anchor a tail to,
+                        // and it is rare enough that the wider scope is cheap
+                        // next to getting it wrong.
+                        report.touched_chats.push(katok::types::TouchedChat {
+                            chat_id: chat_id.to_string(),
+                            earliest_changed_timestamp: String::new(),
+                            earliest_changed_message_id: String::new(),
+                        });
+                    }
+                }
+            }
+            doomed
+        } else {
+            Vec::new()
+        };
 
         let rebuild_started = Instant::now();
         let settings = ChunkSettings {
@@ -357,11 +396,27 @@ fn run_sync(
             upsert_messages,
             rebuild_chunks: rebuild_started.elapsed().as_millis(),
         };
-        Ok::<_, anyhow::Error>(report)
+        Ok::<_, anyhow::Error>((report, pruned))
     })?;
+    let (mut report, pruned) = report;
     // Gate is output-only: the archive always computed touched_chats for the rebuild above.
     report.include_touched = include_touched;
     freshness::record_sync(data_dir, source, report.total_messages, report.chunks)?;
+
+    if prune_preview || prune_deleted {
+        let mut payload = serde_json::to_value(&report).context("serialize sync report")?;
+        if let Some(map) = payload.as_object_mut() {
+            map.insert(
+                if prune_deleted {
+                    "pruned_messages".to_string()
+                } else {
+                    "prunable_messages".to_string()
+                },
+                serde_json::to_value(&pruned).context("serialize pruned")?,
+            );
+        }
+        return print_payload(json, &payload);
+    }
     print_payload(json, &report)
 }
 
