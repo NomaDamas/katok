@@ -146,8 +146,9 @@ impl CancelRect {
 /// Run `work` on a worker thread with a curtain available to it.
 ///
 /// Returns whatever `work` returned. The curtain is always taken down and input
-/// always handed back, including when `work` panics — the tap and the windows
-/// are owned by this function's scope, not by the worker.
+/// always handed back, including when `work` panics: the completion flag is set
+/// from a Drop guard so it survives an unwind, and the tap and the windows are
+/// owned by this function's scope rather than by the worker.
 pub fn run_with_curtain<T, F>(title: &str, work: F) -> std::thread::Result<T>
 where
     F: FnOnce(Arc<CurtainControl>) -> T + Send + 'static,
@@ -181,9 +182,18 @@ where
     let done = Arc::new(AtomicBool::new(false));
     let worker_done = Arc::clone(&done);
     let handle = std::thread::spawn(move || {
-        let result = work(worker_control);
-        worker_done.store(true, Ordering::SeqCst);
-        result
+        // The flag has to be set from a Drop guard, not from a statement after
+        // the call. A panic in `work` unwinds past a trailing store, leaving
+        // `done` false forever — the pump below would spin with the curtain up
+        // and input blocked, which is the worst state this module can be in.
+        struct MarkDone(Arc<AtomicBool>);
+        impl Drop for MarkDone {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let _mark = MarkDone(worker_done);
+        work(worker_control)
     });
 
     let mut visible = false;
@@ -499,4 +509,57 @@ pub fn attachment_label(path: &std::path::Path) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("첨부 파일")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A panicking worker must still end the run.
+    ///
+    /// This is the failure that matters: if the completion flag is not set on
+    /// the unwind path, the pump spins forever with input blocked and the
+    /// screen covered, and the machine is unusable until someone kills the
+    /// process. Off the main thread there is no AppKit, so this exercises the
+    /// worker/flag contract rather than the windows.
+    #[test]
+    fn a_panicking_worker_still_finishes_the_run() {
+        let done = Arc::new(AtomicBool::new(false));
+        let worker_done = Arc::clone(&done);
+        let handle = std::thread::spawn(move || {
+            struct MarkDone(Arc<AtomicBool>);
+            impl Drop for MarkDone {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::SeqCst);
+                }
+            }
+            let _mark = MarkDone(worker_done);
+            panic!("worker blew up");
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "completion flag never set: the pump would spin with the curtain up"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(handle.join().is_err(), "the panic must reach the caller");
+    }
+
+    #[test]
+    fn only_our_own_events_are_recognized_as_synthetic() {
+        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+        let source = CGEventSource::new(CGEventSourceStateID::Private).expect("event source");
+        let ours = CGEvent::new_keyboard_event(source.clone(), 0, true).expect("event");
+        tag_synthetic(&ours);
+        assert!(is_synthetic(&ours));
+
+        // An untagged event is what a real keypress looks like to the tap, and
+        // it must not be mistaken for ours or the block would leak.
+        let theirs = CGEvent::new_keyboard_event(source, 0, true).expect("event");
+        assert!(!is_synthetic(&theirs));
+    }
 }
