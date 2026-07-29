@@ -584,6 +584,11 @@ pub enum SendError {
          it would have landed on whichever room took that position. Nothing was opened; retry."
     )]
     ChatListMoved { room: String },
+    #[error(
+        "the draft is not sitting in {room}'s compose box. It was either not pasted or already \
+         sent — check the chat rather than assuming it is waiting."
+    )]
+    DraftNotStaged { room: String },
     #[error("cancelled before anything was sent")]
     Cancelled,
     #[error(
@@ -816,91 +821,18 @@ fn press_key(pid: i32, key: u16, flags: CGEventFlags) -> Result<(), SendError> {
 #[derive(Debug, Clone)]
 pub struct RoomTarget {
     pub name: String,
-    pub last_activity: Option<String>,
+    /// How many same-named chats are more recently active than this one, which
+    /// is its index among the same-named rows of a most-recent-first chat list.
+    pub rank: Option<usize>,
 }
 
 impl RoomTarget {
     pub fn named(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            last_activity: None,
+            rank: None,
         }
     }
-}
-
-/// Render an RFC3339 timestamp the way the chat list writes its last-message
-/// column, so the two can be compared.
-///
-/// KakaoTalk shows a clock time for today, a word for yesterday, and a date
-/// before that. Only used to separate rooms that share a name — if the format
-/// does not match on some locale or version, the comparison simply fails to
-/// disambiguate and the send is refused, which is the safe direction.
-pub fn chat_list_stamp(rfc3339: &str) -> String {
-    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
-        return String::new();
-    };
-    let local = parsed.with_timezone(&chrono::Local);
-    let today = chrono::Local::now().date_naive();
-    let day = local.date_naive();
-    if day == today {
-        let hour24 = chrono::Timelike::hour(&local);
-        let minute = chrono::Timelike::minute(&local);
-        let (marker, hour12) = if hour24 < 12 {
-            ("오전", if hour24 == 0 { 12 } else { hour24 })
-        } else {
-            ("오후", if hour24 == 12 { 12 } else { hour24 - 12 })
-        };
-        return format!("{marker} {hour12}:{minute:02}");
-    }
-    if day == today.pred_opt().unwrap_or(today) {
-        return "어제".to_string();
-    }
-    // Measured against a live chat list: an older row reads "7월 22일", not the
-    // "2026. 7. 22." this first guessed at.
-    format!(
-        "{}월 {}일",
-        chrono::Datelike::month(&local),
-        chrono::Datelike::day(&local)
-    )
-}
-
-/// The row's last-message column, which is what distinguishes two rooms of the
-/// same name. Returns `None` when the row exposes no such text.
-fn row_last_activity(row: AXUIElementRef) -> Option<String> {
-    let cell = child_elements(row, ATTR_CHILDREN)
-        .into_iter()
-        .find(|c| role_of(c.as_raw()) == ROLE_CELL)?;
-    child_elements(cell.as_raw(), ATTR_CHILDREN)
-        .into_iter()
-        .filter(|c| role_of(c.as_raw()) == ROLE_STATIC_TEXT)
-        .filter_map(|t| attr_string(t.as_raw(), ATTR_VALUE))
-        .map(|value| value.trim().to_string())
-        .find(|value| is_activity_stamp(value))
-}
-
-/// Whether a row's static text is the last-message stamp rather than a name or
-/// an unread badge: a clock time, a relative day, or an absolute date.
-fn is_activity_stamp(value: &str) -> bool {
-    if value.contains("오전")
-        || value.contains("오후")
-        || value.contains("AM")
-        || value.contains("PM")
-    {
-        return true;
-    }
-    if matches!(value, "어제" | "오늘" | "Yesterday" | "Today") {
-        return true;
-    }
-    // "7월 22일" is what an older row actually shows.
-    if value.contains('월') && value.contains('일') && value.chars().any(|c| c.is_ascii_digit()) {
-        return true;
-    }
-    // Date-like forms with separators, but never a bare unread count.
-    !value.is_empty()
-        && value.chars().any(|c| matches!(c, '.' | '/' | '-' | ':'))
-        && value
-            .chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '/' | '-' | ':' | ' '))
 }
 
 /// Pick the one row that is the target, or say why that cannot be decided.
@@ -918,13 +850,14 @@ fn choose_row<'a>(rows: &'a [AxRef], target: &RoomTarget) -> Result<&'a AxRef, S
         _ => {
             // Same name, more than one room. The last-message column is the only
             // thing on screen that tells them apart.
-            if let Some(stamp) = &target.last_activity {
-                let exact: Vec<&&AxRef> = named
-                    .iter()
-                    .filter(|r| row_last_activity(r.as_raw()).as_deref() == Some(stamp.as_str()))
-                    .collect();
-                if exact.len() == 1 {
-                    return Ok(exact[0]);
+            // Rows come most-recent-first, so the archive's recency ranking is
+            // the index. Deliberately not an exact last-message-time compare:
+            // that was tried and it goes stale within a minute in a room
+            // somebody is actively typing in, which refuses the very sends most
+            // likely to be wanted.
+            if let Some(rank) = target.rank {
+                if let Some(hit) = named.get(rank) {
+                    return Ok(hit);
                 }
             }
             Err(SendError::AmbiguousRoom {
@@ -1879,6 +1812,93 @@ pub fn send_to_open_window(
         return Ok(());
     }
     Err(SendError::NotSent)
+}
+
+/// Put UTF-8 `text` on the clipboard.
+fn put_text_on_clipboard(text: &str) -> Result<(), SendError> {
+    let (pasteboard, _guard) = open_clipboard()?;
+    let status = unsafe { PasteboardClear(pasteboard) };
+    if status != OS_NO_ERR {
+        return Err(SendError::ClipboardFailed(status));
+    }
+    let data = CFData::from_buffer(text.as_bytes());
+    let flavor = CFString::new("public.utf8-plain-text");
+    let status = unsafe {
+        PasteboardPutItemFlavor(
+            pasteboard,
+            std::ptr::dangling::<c_void>(),
+            flavor.as_concrete_TypeRef(),
+            data.as_concrete_TypeRef(),
+            0,
+        )
+    };
+    if status != OS_NO_ERR {
+        return Err(SendError::ClipboardFailed(status));
+    }
+    Ok(())
+}
+
+/// Leave `text` in the room's compose box for a person to read and decide on.
+///
+/// It goes in by paste, not by `AXValue`. Writing that attribute *is* sending:
+/// KakaoTalk delivers the message the moment the value changes, with no
+/// keystroke involved — an earlier draft mode assumed otherwise, reported
+/// `sent: false`, and put two messages into real conversations. Paste inserts
+/// text and nothing more, so the box fills and stays filled.
+///
+/// The cost is the screen: Cmd+V is a menu key equivalent, so KakaoTalk has to
+/// be frontmost, which is what the curtain is for. The clipboard is saved and
+/// restored around it.
+pub fn draft_to_open_window(
+    target: &RoomTarget,
+    text: &str,
+    allow_open: bool,
+    ctx: &SendContext,
+) -> Result<(), SendError> {
+    validate_room_name(&target.name)?;
+    if !unsafe { AXIsProcessTrusted() } {
+        return Err(SendError::AccessibilityDenied);
+    }
+    let pid = kakaotalk_pid().ok_or(SendError::NotRunning)?;
+    let app = AxRef(unsafe { AXUIElementCreateApplication(pid) });
+    let window = resolve_window(&app, target, allow_open, ctx)?;
+    let compose = compose_box(window.as_raw())
+        .ok_or_else(|| SendError::ComposeBoxNotFound(target.name.clone()))?;
+
+    let clipboard = ClipboardRestore::capture()?;
+    if clipboard.unreadable_flavors() > 0 {
+        eprintln!(
+            "katok: {} clipboard flavor(s) could not be read and will not be restored",
+            clipboard.unreadable_flavors()
+        );
+    }
+    put_text_on_clipboard(text)?;
+
+    let _hold = take_screen(pid, ctx, &format!("{} 초안 작성 중", target.name))?;
+    let focus_key = CFString::new(ATTR_FOCUSED);
+    let yes = core_foundation::boolean::CFBoolean::true_value();
+    unsafe {
+        AXUIElementSetAttributeValue(
+            compose.as_raw(),
+            focus_key.as_concrete_TypeRef(),
+            yes.as_CFTypeRef(),
+        )
+    };
+    press_key_global_at(pid, KEY_V, CGEventFlags::CGEventFlagCommand)?;
+
+    // The box must end up holding the draft. Empty means either the paste never
+    // landed or — the case that matters — it was sent, and reporting a waiting
+    // draft that is not there is the failure this mode exists to avoid.
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(50));
+        let value = attr_string(compose.as_raw(), ATTR_VALUE).unwrap_or_default();
+        if value.contains(text) {
+            return Ok(());
+        }
+    }
+    Err(SendError::DraftNotStaged {
+        room: target.name.clone(),
+    })
 }
 
 /// Resolve (opening if needed) the chat window for `room` without sending anything.

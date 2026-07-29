@@ -144,6 +144,12 @@ pub(crate) enum Commands {
         /// must never touch the screen: opening a room briefly moves KakaoTalk's own windows.
         #[arg(long)]
         no_open: bool,
+        /// Leave the message in the compose box for review instead of sending it.
+        ///
+        /// Pasted rather than typed, so nothing is delivered until a person presses Enter.
+        /// Needs the screen for a moment, like sending an image does.
+        #[arg(long, conflicts_with_all = ["image", "dry_run"])]
+        draft: bool,
         /// Take focus immediately instead of waiting for a gap in your typing.
         ///
         /// Only steps that cannot run in the background wait at all — sending an image, and

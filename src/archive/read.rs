@@ -133,20 +133,42 @@ impl Archive {
     /// `send` addresses rooms by the name KakaoTalk shows, and those names are
     /// not unique — so the last-message time comes along as the only thing on
     /// the chat list that tells two same-named rooms apart.
-    pub fn chat_identity(&self, chat_id: &str) -> Result<Option<(String, String)>> {
-        self.conn
+    /// Returns the display name and, when other chats share it, how many of them
+    /// are more recently active.
+    ///
+    /// That count is the room's position among the same-named rows of the chat
+    /// list, which orders most-recent-first — and position survives what an
+    /// exact timestamp does not. The archive only knows what the last sync saw,
+    /// so in a room being typed in right now its idea of "last message" is stale
+    /// within a minute, while the ordering only changes if a *different*
+    /// same-named room overtakes it.
+    pub fn chat_identity(&self, chat_id: &str) -> Result<Option<(String, usize)>> {
+        let Some(name): Option<String> = self
+            .conn
             .query_row(
-                "SELECT chat_name, MAX(timestamp) FROM messages WHERE chat_id = ?1",
+                "SELECT chat_name FROM messages WHERE chat_id = ?1 LIMIT 1",
                 [chat_id],
-                |row| {
-                    let name: Option<String> = row.get(0)?;
-                    let last: Option<String> = row.get(1)?;
-                    Ok(name.zip(last))
-                },
+                |row| row.get(0),
             )
             .optional()
-            .map_err(Error::Sql)
-            .map(Option::flatten)
+            .map_err(Error::Sql)?
+        else {
+            return Ok(None);
+        };
+        let rank: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM (
+                     SELECT chat_id, MAX(timestamp) AS last FROM messages
+                     WHERE chat_name = ?1 GROUP BY chat_id
+                 ) peers
+                 WHERE peers.chat_id <> ?2
+                   AND peers.last > (SELECT MAX(timestamp) FROM messages WHERE chat_id = ?2)",
+                params![name, chat_id],
+                |row| row.get(0),
+            )
+            .map_err(Error::Sql)?;
+        Ok(Some((name, rank as usize)))
     }
 
     pub fn raw_messages(&self) -> Result<Vec<StoredMessage>> {

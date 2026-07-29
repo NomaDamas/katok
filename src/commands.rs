@@ -97,6 +97,7 @@ pub(crate) fn run(
             limit,
             dry_run,
             no_open,
+            draft,
             take_focus_now,
             focus_wait,
             json,
@@ -110,6 +111,7 @@ pub(crate) fn run(
             limit,
             dry_run,
             no_open,
+            draft,
             take_focus_now,
             focus_wait,
             json,
@@ -130,6 +132,7 @@ fn run_send(
     limit: usize,
     dry_run: bool,
     no_open: bool,
+    draft: bool,
     take_focus_now: bool,
     focus_wait: u64,
     json: bool,
@@ -192,13 +195,13 @@ fn run_send(
     let target = match (&room, &chat) {
         (_, Some(chat_id)) => {
             let archive = Archive::open(archive_path).context("open archive")?;
-            let (name, last) = archive
+            let (name, rank) = archive
                 .chat_identity(chat_id)
                 .context("look up chat")?
                 .with_context(|| format!("no chat {chat_id} in the archive; run sync first"))?;
             ax_send::RoomTarget {
                 name,
-                last_activity: Some(ax_send::chat_list_stamp(&last)),
+                rank: Some(rank),
             }
         }
         (Some(name), None) => ax_send::RoomTarget::named(name),
@@ -208,21 +211,35 @@ fn run_send(
     let target_owned = target.clone();
     let image_owned = image.clone();
     let body_owned = body.clone();
-    let outcome =
-        katok::kakao::send_curtain::run_with_curtain("카톡 전송중…", move |curtain| {
-            let ctx = ax_send::SendContext {
-                policy,
-                curtain: Some(curtain),
-            };
-            if dry_run {
-                return ax_send::resolve_room_window(&target_owned, allow_open, &ctx);
-            }
-            if let Some(path) = &image_owned {
-                return ax_send::send_image_to_open_window(&target_owned, path, allow_open, &ctx);
-            }
-            let body = body_owned.expect("text body prepared before the curtain");
-            ax_send::send_to_open_window(&target_owned, &body, allow_open, &ctx)
-        });
+    // The curtain says what is actually happening. It used to read "전송중" for
+    // every operation, including ones that send nothing at all — the same kind
+    // of claim that made a draft mode report `sent: false` while delivering.
+    let curtain_title = if dry_run {
+        "카톡 채팅방 여는 중"
+    } else if draft {
+        "카톡 초안 넣는 중"
+    } else if image.is_some() {
+        "카톡 이미지 보내는 중"
+    } else {
+        "카톡 보내는 중"
+    };
+    let outcome = katok::kakao::send_curtain::run_with_curtain(curtain_title, move |curtain| {
+        let ctx = ax_send::SendContext {
+            policy,
+            curtain: Some(curtain),
+        };
+        if dry_run {
+            return ax_send::resolve_room_window(&target_owned, allow_open, &ctx);
+        }
+        if let Some(path) = &image_owned {
+            return ax_send::send_image_to_open_window(&target_owned, path, allow_open, &ctx);
+        }
+        let body = body_owned.expect("text body prepared before the curtain");
+        if draft {
+            return ax_send::draft_to_open_window(&target_owned, &body, allow_open, &ctx);
+        }
+        ax_send::send_to_open_window(&target_owned, &body, allow_open, &ctx)
+    });
 
     match outcome {
         Ok(result) => result?,
@@ -252,7 +269,12 @@ fn run_send(
     let chars = body.map(|b| b.chars().count()).unwrap_or(0);
     print_payload(
         json,
-        &serde_json::json!({ "sent": true, "room": room_display, "chars": chars }),
+        &serde_json::json!({
+            "sent": !draft,
+            "drafted": draft,
+            "room": room_display,
+            "chars": chars
+        }),
     )
 }
 
