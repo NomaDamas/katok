@@ -41,6 +41,14 @@ struct RoomMeta {
     /// reconstruct a name when neither `chatName` nor a title exists. Empty when
     /// unavailable.
     display_member_ids: Vec<i64>,
+    /// An open chat's own name, from `NTOpenLink.linkName`.
+    ///
+    /// `NTChatRoom.chatName` is NULL for these, so without it the room falls
+    /// through to a reconstructed member list and ends up stored under a name
+    /// that appears nowhere in KakaoTalk. On the reference install that
+    /// mislabelled the largest room in the archive — 185,066 messages filed
+    /// under `제이, a member, …` instead of `주말 등산`.
+    open_link_name: Option<String>,
 }
 
 /// Open `path` with `key` as a passphrase in cipher-compatibility mode 3,
@@ -126,6 +134,7 @@ fn load_rooms(conn: &Connection) -> Result<HashMap<i64, RoomMeta>> {
                     title: None,
                     direct_member_id: direct_member,
                     display_member_ids: Vec::new(),
+                    open_link_name: None,
                 },
             ))
         })
@@ -137,6 +146,7 @@ fn load_rooms(conn: &Connection) -> Result<HashMap<i64, RoomMeta>> {
         rooms.entry(chat_id).or_insert(meta);
     }
     enrich_titles(conn, &mut rooms);
+    enrich_open_link_names(conn, &mut rooms);
     enrich_display_members(conn, &mut rooms);
     Ok(rooms)
 }
@@ -164,6 +174,37 @@ fn enrich_titles(conn: &Connection, rooms: &mut HashMap<i64, RoomMeta>) {
     for (chat_id, content) in rows.flatten() {
         if let Some(meta) = rooms.get_mut(&chat_id) {
             meta.title = Some(content);
+        }
+    }
+}
+
+/// Best-effort: fill `open_link_name` by joining `NTChatRoom.linkId` to
+/// `NTOpenLink.linkName`.
+///
+/// An open chat has no `chatName`, so without this it falls through to a
+/// reconstructed member list — a name that appears nowhere in the app, cannot be
+/// searched for, and cannot be passed to `katok send --room`. An install missing
+/// either column, or any read error, simply leaves the old behaviour rather than
+/// aborting the room load.
+fn enrich_open_link_names(conn: &Connection, rooms: &mut HashMap<i64, RoomMeta>) {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT r.chatId, l.linkName
+         FROM NTChatRoom r
+         JOIN NTOpenLink l ON l.linkId = r.linkId
+         WHERE r.linkId <> 0 AND l.linkName IS NOT NULL AND l.linkName <> ''",
+    ) else {
+        return;
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        let chat_id: i64 = row.get(0)?;
+        let name: String = row.get(1)?;
+        Ok((chat_id, name))
+    }) else {
+        return;
+    };
+    for (chat_id, name) in rows.flatten() {
+        if let Some(meta) = rooms.get_mut(&chat_id) {
+            meta.open_link_name = Some(name);
         }
     }
 }
@@ -213,6 +254,12 @@ fn resolve_chat_name(
         }
         if let Some(title) = &meta.title {
             return title.clone();
+        }
+        // An open chat carries its name on the link, not on the room. Ahead of
+        // the member fallback because that fallback invents a name nobody in
+        // KakaoTalk would recognise.
+        if let Some(link_name) = &meta.open_link_name {
+            return link_name.clone();
         }
         // Direct chat: the peer's nickname. Never the account owner itself
         // (a self-chat / anomalous room must fall through, not take our name).
