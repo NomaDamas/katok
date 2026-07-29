@@ -10,6 +10,17 @@
 //! the global HID tap instead would require activating KakaoTalk, stealing the user's screen and
 //! breaking whenever they click something mid-send.
 //!
+//! **Writing the compose box IS sending.** Setting `AXValue` on it does not
+//! stage text for a person to review — KakaoTalk delivers the message on the
+//! spot, measured with a single-line body and no keystroke of any kind. The
+//! `Enter` below is therefore belt-and-braces, not the trigger. A `--draft`
+//! mode was built on the opposite assumption, reported `sent: false`, and put
+//! two messages into real conversations before the archive showed what had
+//! actually happened; it was removed rather than repaired, because any "write
+//! but do not send" feature has to be proven against the app before it is
+//! offered. Pasting via the clipboard without pressing Enter is the untried
+//! candidate, and it needs the screen.
+//!
 //! Scope: the target chat window must already be open. Locating an arbitrary room means either
 //! crawling the chat list or driving the search field, and both are slow enough (~20s, dominated
 //! by per-node AX round trips) that the caller is better off opening the room once and keeping
@@ -461,6 +472,26 @@ fn raise_and_confirm(pid: i32) -> bool {
     false
 }
 
+/// Re-assert frontmost and immediately perform `action`.
+///
+/// Raising once and acting later is a check-then-act with a gap in it, and
+/// anything that activates in that gap — another tool opening a window, a
+/// notification, the user — leaves the action aimed at the wrong application.
+/// Every step that posts to the screen or the global tap goes through here, so
+/// "bring it forward" is part of the action rather than a separate earlier one.
+fn front_then<T>(pid: i32, action: impl FnOnce() -> T) -> Result<T, SendError> {
+    for _ in 0..3 {
+        activate(pid);
+        // Just long enough for the activation to take, short enough that the
+        // window for something else to grab focus stays small.
+        std::thread::sleep(Duration::from_millis(60));
+        if app_is_frontmost(pid) {
+            return Ok(action());
+        }
+    }
+    Err(SendError::FocusLost)
+}
+
 /// Post a global key only while `pid` is confirmed frontmost.
 ///
 /// The confirmation is re-read immediately before the post, so the window in
@@ -468,10 +499,7 @@ fn raise_and_confirm(pid: i32) -> bool {
 /// syscall in between. Without this, a Cmd+V meant for KakaoTalk lands in
 /// whatever the user clicked on.
 fn press_key_global_at(pid: i32, key: u16, flags: CGEventFlags) -> Result<(), SendError> {
-    if !app_is_frontmost(pid) {
-        return Err(SendError::FocusLost);
-    }
-    press_key_global(key, flags)
+    front_then(pid, || press_key_global(key, flags))?
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -531,6 +559,11 @@ pub enum SendError {
          Nothing was sent; retry."
     )]
     FocusLost,
+    #[error(
+        "the chat list reordered while '{room}' was being opened, so the click was not sent — \
+         it would have landed on whichever room took that position. Nothing was opened; retry."
+    )]
+    ChatListMoved { room: String },
     #[error("cancelled before anything was sent")]
     Cancelled,
     #[error(
@@ -1130,8 +1163,17 @@ fn open_row_by_click(
     // Re-confirm after the raise settled: the click is about to be posted to
     // screen coordinates, and if the user grabbed focus back it would land in
     // their window instead of the chat list.
-    if frontmost_pid() != Some(pid) {
-        return Err(SendError::FocusLost);
+    // And re-read the row itself. The chat list reorders the moment any room
+    // receives a message, and an `AXRow` is positional — so between picking the
+    // row and clicking its coordinates, that position can already belong to a
+    // different conversation. Measured while dogfooding: aiming at one room
+    // opened another. Sending is protected downstream by the window-title check,
+    // but opening the wrong person's chat is its own harm, so this fails and
+    // lets the caller retry against a settled list.
+    if row_room_name(row).as_deref() != Some(room) {
+        return Err(SendError::ChatListMoved {
+            room: room.to_string(),
+        });
     }
 
     // Read geometry after raising: the row can move as the window comes forward.
@@ -1145,19 +1187,22 @@ fn open_row_by_click(
         .map_err(|_| SendError::KeyEventFailed)?;
     let restore = CGEvent::new(source.clone()).ok().map(|e| e.location());
 
-    for click in 1..=2 {
-        for (kind, _) in [
-            (CGEventType::LeftMouseDown, ()),
-            (CGEventType::LeftMouseUp, ()),
-        ] {
-            let ev = CGEvent::new_mouse_event(source.clone(), kind, target, CGMouseButton::Left)
-                .map_err(|_| SendError::KeyEventFailed)?;
-            ev.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click);
-            tag_synthetic(&ev);
-            ev.post(CGEventTapLocation::HID);
+    // Bring it forward as part of the click, not before it: the double-click is
+    // aimed at screen coordinates, so anything that activates in between would
+    // receive it instead.
+    front_then(pid, || -> Result<(), SendError> {
+        for click in 1..=2 {
+            for kind in [CGEventType::LeftMouseDown, CGEventType::LeftMouseUp] {
+                let ev = CGEvent::new_mouse_event(source.clone(), kind, target, CGMouseButton::Left)
+                    .map_err(|_| SendError::KeyEventFailed)?;
+                ev.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click);
+                tag_synthetic(&ev);
+                ev.post(CGEventTapLocation::HID);
+            }
+            std::thread::sleep(Duration::from_millis(40));
         }
-        std::thread::sleep(std::time::Duration::from_millis(40));
-    }
+        Ok(())
+    })??;
 
     if let Some(p) = restore {
         if let Ok(ev) =

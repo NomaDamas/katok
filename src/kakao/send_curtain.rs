@@ -34,7 +34,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use core_foundation::runloop::{kCFRunLoopCommonModes, kCFRunLoopDefaultMode, CFRunLoop};
 use core_graphics::event::{
@@ -95,25 +95,50 @@ pub struct CurtainControl {
     /// Raised only while the send genuinely needs the screen, so an ordinary
     /// background text send never covers anything.
     shown: AtomicBool,
+    /// Whether the tap is swallowing input.
+    ///
+    /// Separate from `shown` and from the drawn curtain on purpose. Arming used
+    /// to be inferred from the cancel button's rect, which the main thread only
+    /// fills in *after* it has drawn the curtain — so for the tick it took that
+    /// to happen, the curtain had been asked for but input was still live, and a
+    /// click in that gap took focus away from the app we were about to drive.
+    /// The worker sets this synchronously before anything else moves.
+    armed: AtomicBool,
+    /// Set by the main thread once the curtain is actually on screen, so the
+    /// worker can wait for the real thing instead of sleeping a guessed amount.
+    visible: AtomicBool,
     subtitle: Mutex<String>,
     revision: AtomicUsize,
     cancel: CancelFlag,
 }
 
 impl CurtainControl {
-    /// Raise the curtain and start swallowing user input.
+    /// Start swallowing user input, then raise the curtain and wait for it.
+    ///
+    /// Arming comes first and is synchronous: from the instant this is entered,
+    /// a click cannot reach another application. Drawing follows, and the wait
+    /// is for the main thread's acknowledgement rather than a fixed sleep,
+    /// because a guessed delay is either too short — which is what let a click
+    /// through — or wasted time.
     pub fn show(&self, subtitle: &str) {
+        self.armed.store(true, Ordering::SeqCst);
         *self.subtitle.lock().expect("curtain subtitle") = subtitle.to_string();
         self.revision.fetch_add(1, Ordering::SeqCst);
         self.shown.store(true, Ordering::SeqCst);
-        // Give the main-thread pump a moment to actually put it up, so input is
-        // already blocked by the time the caller starts driving the UI.
-        std::thread::sleep(Duration::from_millis(120));
+
+        // Bounded: if the pump is wedged the send should still proceed with
+        // input blocked rather than hang, and every later step re-checks
+        // frontmost anyway.
+        let deadline = Instant::now() + Duration::from_millis(600);
+        while !self.visible.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// Lower the curtain and hand input back.
     pub fn hide(&self) {
         self.shown.store(false, Ordering::SeqCst);
+        self.armed.store(false, Ordering::SeqCst);
     }
 
     pub fn cancel_flag(&self) -> CancelFlag {
@@ -161,6 +186,8 @@ where
         // than refusing outright; every caller still checks frontmost itself.
         let control = Arc::new(CurtainControl {
             shown: AtomicBool::new(false),
+            armed: AtomicBool::new(false),
+            visible: AtomicBool::new(false),
             subtitle: Mutex::new(String::new()),
             revision: AtomicUsize::new(0),
             cancel: CancelFlag::new(),
@@ -170,13 +197,15 @@ where
 
     let control = Arc::new(CurtainControl {
         shown: AtomicBool::new(false),
+        armed: AtomicBool::new(false),
+        visible: AtomicBool::new(false),
         subtitle: Mutex::new(String::new()),
         revision: AtomicUsize::new(0),
         cancel: CancelFlag::new(),
     });
 
     let cancel_rect = Arc::new(Mutex::new(CancelRect::default()));
-    let _tap = install_input_tap(control.cancel.clone(), Arc::clone(&cancel_rect));
+    let _tap = install_input_tap(Arc::clone(&control), Arc::clone(&cancel_rect));
 
     let mut curtain = autoreleasepool(|_| CurtainWindows::new(mtm, title));
 
@@ -210,23 +239,40 @@ where
                 *cancel_rect.lock().expect("cancel rect") = curtain.cancel_rect();
                 last_revision = revision;
                 visible = true;
+                // Only now is it genuinely on screen; the worker is waiting on
+                // exactly this rather than on a guessed sleep.
+                control.visible.store(true, Ordering::SeqCst);
             } else if !want && visible {
                 curtain.hide();
                 *cancel_rect.lock().expect("cancel rect") = CancelRect::default();
                 visible = false;
+                control.visible.store(false, Ordering::SeqCst);
+            } else if visible {
+                // Re-assert every tick. Ordering front once is not a promise it
+                // stays there: an app activating behind us — including the one
+                // this send is about to raise — can otherwise end up above the
+                // curtain, which would leave the screen looking unblocked while
+                // input still is.
+                curtain.raise();
             }
         });
         // Servicing this run loop is what delivers tap callbacks and lets the
-        // windows draw; the timeout doubles as the animation frame interval.
+        // windows draw.
         //
         // The mode has to be a real one. `kCFRunLoopCommonModes` is a pseudo-mode
         // that only means anything when *adding* a source; passing it here makes
         // CFRunLoopRunInMode reject the call and return immediately, which turns
         // this loop into a busy spin that never draws the curtain or delivers a
         // single tap callback.
+        //
+        // The tick is short while the curtain is up or wanted, because that
+        // interval is the delay between the worker asking for the screen and the
+        // curtain actually covering it, and idle otherwise so a background text
+        // send does not spin.
+        let tick = if want || visible { 15 } else { 80 };
         CFRunLoop::run_in_mode(
             unsafe { kCFRunLoopDefaultMode },
-            Duration::from_millis(80),
+            Duration::from_millis(tick),
             true,
         );
     }
@@ -241,7 +287,7 @@ where
 /// That is reported by the caller rather than silently proceeding unguarded:
 /// see [`run_with_curtain`], where the send still verifies frontmost itself.
 fn install_input_tap(
-    cancel: CancelFlag,
+    control: Arc<CurtainControl>,
     cancel_rect: Arc<Mutex<CancelRect>>,
 ) -> Option<TapGuard<'static>> {
     let tap = CGEventTap::new(
@@ -271,12 +317,18 @@ fn install_input_tap(
                 // Curtain is down: this is an ordinary moment in the user's day.
                 return CallbackResult::Keep;
             }
+            // Cancellation needs the curtain to be on screen. Armed runs ahead
+            // of drawn by design, and in that window an Escape belongs to
+            // whatever the user was already doing — treating it as "stop the
+            // send" cancelled runs that had not visibly started.
+            let showing = control.visible.load(Ordering::SeqCst);
             match event_type {
                 CGEventType::KeyDown => {
-                    if event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE)
-                        == ESC_KEYCODE
+                    if showing
+                        && event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE)
+                            == ESC_KEYCODE
                     {
-                        cancel.cancel();
+                        control.cancel.cancel();
                     }
                 }
                 CGEventType::LeftMouseDown => {
@@ -284,8 +336,8 @@ fn install_input_tap(
                         .lock()
                         .map(|rect| rect.contains(event.location()))
                         .unwrap_or(false);
-                    if inside {
-                        cancel.cancel();
+                    if showing && inside {
+                        control.cancel.cancel();
                     }
                 }
                 _ => {}
@@ -541,6 +593,13 @@ impl CurtainWindows {
         self.visible = true;
     }
 
+    /// Put the curtain back on top without changing anything else.
+    fn raise(&self) {
+        for window in &self.windows {
+            window.orderFrontRegardless();
+        }
+    }
+
     fn hide(&mut self) {
         if let Some(spinner) = &self.spinner {
             unsafe { spinner.stopAnimation(None) };
@@ -611,10 +670,10 @@ mod tests {
             panic!("worker blew up");
         });
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(5);
         while !done.load(Ordering::SeqCst) {
             assert!(
-                std::time::Instant::now() < deadline,
+                Instant::now() < deadline,
                 "completion flag never set: the pump would spin with the curtain up"
             );
             std::thread::sleep(Duration::from_millis(10));
