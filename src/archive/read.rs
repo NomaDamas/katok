@@ -128,6 +128,27 @@ impl Archive {
             .collect()
     }
 
+    /// A chat's display name and the timestamp of its last message.
+    ///
+    /// `send` addresses rooms by the name KakaoTalk shows, and those names are
+    /// not unique — so the last-message time comes along as the only thing on
+    /// the chat list that tells two same-named rooms apart.
+    pub fn chat_identity(&self, chat_id: &str) -> Result<Option<(String, String)>> {
+        self.conn
+            .query_row(
+                "SELECT chat_name, MAX(timestamp) FROM messages WHERE chat_id = ?1",
+                [chat_id],
+                |row| {
+                    let name: Option<String> = row.get(0)?;
+                    let last: Option<String> = row.get(1)?;
+                    Ok(name.zip(last))
+                },
+            )
+            .optional()
+            .map_err(Error::Sql)
+            .map(Option::flatten)
+    }
+
     pub fn raw_messages(&self) -> Result<Vec<StoredMessage>> {
         let mut stmt = self
             .conn

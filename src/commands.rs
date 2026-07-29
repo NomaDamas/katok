@@ -89,6 +89,7 @@ pub(crate) fn run(
         #[cfg(target_os = "macos")]
         Commands::Send {
             room,
+            chat,
             text,
             image,
             list_windows,
@@ -100,7 +101,8 @@ pub(crate) fn run(
             focus_wait,
             json,
         } => run_send(
-            &room,
+            room,
+            chat,
             text,
             image,
             list_windows,
@@ -111,6 +113,7 @@ pub(crate) fn run(
             take_focus_now,
             focus_wait,
             json,
+            &archive_path,
         ),
     }
 }
@@ -118,7 +121,8 @@ pub(crate) fn run(
 #[allow(clippy::too_many_arguments)]
 #[cfg(target_os = "macos")]
 fn run_send(
-    room: &str,
+    room: Option<String>,
+    chat: Option<String>,
     text: Option<String>,
     image: Option<PathBuf>,
     list_windows: bool,
@@ -129,6 +133,7 @@ fn run_send(
     take_focus_now: bool,
     focus_wait: u64,
     json: bool,
+    archive_path: &Path,
 ) -> Result<()> {
     use katok::kakao::ax_send;
     use std::io::Read;
@@ -180,7 +185,27 @@ fn run_send(
     // The curtain owns the main thread — AppKit insists on it — so the send runs
     // on a worker. It only actually covers the screen for the steps that must
     // bring KakaoTalk forward; an ordinary background text send never raises it.
-    let room_owned = room.to_string();
+    // Resolve the target once. A `--chat` id also brings the last-message time,
+    // which is the only thing on the chat list that separates two rooms sharing
+    // a name — without it such a send is refused rather than sent to whichever
+    // one happens to sit higher.
+    let target = match (&room, &chat) {
+        (_, Some(chat_id)) => {
+            let archive = Archive::open(archive_path).context("open archive")?;
+            let (name, last) = archive
+                .chat_identity(chat_id)
+                .context("look up chat")?
+                .with_context(|| format!("no chat {chat_id} in the archive; run sync first"))?;
+            ax_send::RoomTarget {
+                name,
+                last_activity: Some(ax_send::chat_list_stamp(&last)),
+            }
+        }
+        (Some(name), None) => ax_send::RoomTarget::named(name),
+        (None, None) => anyhow::bail!("pass --room or --chat"),
+    };
+    let room_display = target.name.clone();
+    let target_owned = target.clone();
     let image_owned = image.clone();
     let body_owned = body.clone();
     let outcome =
@@ -190,13 +215,13 @@ fn run_send(
                 curtain: Some(curtain),
             };
             if dry_run {
-                return ax_send::resolve_room_window(&room_owned, allow_open, &ctx);
+                return ax_send::resolve_room_window(&target_owned, allow_open, &ctx);
             }
             if let Some(path) = &image_owned {
-                return ax_send::send_image_to_open_window(&room_owned, path, allow_open, &ctx);
+                return ax_send::send_image_to_open_window(&target_owned, path, allow_open, &ctx);
             }
             let body = body_owned.expect("text body prepared before the curtain");
-            ax_send::send_to_open_window(&room_owned, &body, allow_open, &ctx)
+            ax_send::send_to_open_window(&target_owned, &body, allow_open, &ctx)
         });
 
     match outcome {
@@ -209,7 +234,7 @@ fn run_send(
     if dry_run {
         return print_payload(
             json,
-            &serde_json::json!({ "resolved": true, "room": room, "sent": false }),
+            &serde_json::json!({ "resolved": true, "room": room_display, "sent": false }),
         );
     }
     if let Some(path) = image {
@@ -220,14 +245,14 @@ fn run_send(
             .unwrap_or("(unnamed)");
         return print_payload(
             json,
-            &serde_json::json!({ "sent": true, "room": room, "image": name }),
+            &serde_json::json!({ "sent": true, "room": room_display, "image": name }),
         );
     }
     // Never echo the body: sent content is as sensitive as anything else this crate handles.
     let chars = body.map(|b| b.chars().count()).unwrap_or(0);
     print_payload(
         json,
-        &serde_json::json!({ "sent": true, "room": room, "chars": chars }),
+        &serde_json::json!({ "sent": true, "room": room_display, "chars": chars }),
     )
 }
 

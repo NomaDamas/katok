@@ -109,10 +109,19 @@ pub(crate) enum Commands {
     /// target window must already be open; KakaoTalk is never brought to the front.
     #[cfg(target_os = "macos")]
     Send {
-        /// Exact title of the open chat window. Note the self-chat window is titled with your
-        /// own nickname, not "나와의 채팅".
-        #[arg(long)]
-        room: String,
+        /// Title of the chat as the chat list shows it. Note the self-chat window is titled
+        /// with your own nickname, not "나와의 채팅".
+        ///
+        /// Names are not unique — several rooms can share one. When they do, the send is
+        /// refused rather than guessed at; use `--chat` instead.
+        #[arg(long, required_unless_present = "chat")]
+        room: Option<String>,
+        /// Address the room by its `chat_id`, as `search` and `chunks` report it.
+        ///
+        /// Unambiguous: the name and the last-message time are both read from the archive, and
+        /// together they pick the right row even when two rooms share a name.
+        #[arg(long, conflicts_with = "room")]
+        chat: Option<String>,
         /// Message body. Reads stdin when omitted.
         #[arg(long)]
         text: Option<String>,

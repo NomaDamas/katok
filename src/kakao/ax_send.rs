@@ -533,6 +533,12 @@ pub enum SendError {
     #[error("could not reach KakaoTalk's chat search box")]
     SearchUnavailable,
     #[error(
+        "{count} chats are named '{room}', and nothing on screen tells them apart. Nothing was \
+         opened: sending to the wrong one cannot be undone. Pass --chat <chat-id> so the last \
+         message can be used to pick, or rename one of them."
+    )]
+    AmbiguousRoom { room: String, count: usize },
+    #[error(
         "--room contains characters a chat name cannot: {offenders}. This is almost always a \
          quoting accident in whatever built the argument, not a missing room.\n  room: {room}"
     )]
@@ -796,6 +802,139 @@ fn press_key(pid: i32, key: u16, flags: CGEventFlags) -> Result<(), SendError> {
     Ok(())
 }
 
+/// Which room to act on.
+///
+/// A display name is not an identifier: on the reference install four names are
+/// shared by two rooms each, and one archive name covers nine. Picking the first
+/// row that matches therefore sends to whichever of them happens to sit higher,
+/// and a message delivered to the wrong person cannot be taken back — so an
+/// ambiguous name is refused rather than guessed at.
+///
+/// `last_activity` is the chat list's own last-message column for the intended
+/// room, which the archive can supply from a `chat_id`. It is only ever used to
+/// choose between rooms that already share a name.
+#[derive(Debug, Clone)]
+pub struct RoomTarget {
+    pub name: String,
+    pub last_activity: Option<String>,
+}
+
+impl RoomTarget {
+    pub fn named(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            last_activity: None,
+        }
+    }
+}
+
+/// Render an RFC3339 timestamp the way the chat list writes its last-message
+/// column, so the two can be compared.
+///
+/// KakaoTalk shows a clock time for today, a word for yesterday, and a date
+/// before that. Only used to separate rooms that share a name — if the format
+/// does not match on some locale or version, the comparison simply fails to
+/// disambiguate and the send is refused, which is the safe direction.
+pub fn chat_list_stamp(rfc3339: &str) -> String {
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
+        return String::new();
+    };
+    let local = parsed.with_timezone(&chrono::Local);
+    let today = chrono::Local::now().date_naive();
+    let day = local.date_naive();
+    if day == today {
+        let hour24 = chrono::Timelike::hour(&local);
+        let minute = chrono::Timelike::minute(&local);
+        let (marker, hour12) = if hour24 < 12 {
+            ("오전", if hour24 == 0 { 12 } else { hour24 })
+        } else {
+            ("오후", if hour24 == 12 { 12 } else { hour24 - 12 })
+        };
+        return format!("{marker} {hour12}:{minute:02}");
+    }
+    if day == today.pred_opt().unwrap_or(today) {
+        return "어제".to_string();
+    }
+    // Measured against a live chat list: an older row reads "7월 22일", not the
+    // "2026. 7. 22." this first guessed at.
+    format!(
+        "{}월 {}일",
+        chrono::Datelike::month(&local),
+        chrono::Datelike::day(&local)
+    )
+}
+
+/// The row's last-message column, which is what distinguishes two rooms of the
+/// same name. Returns `None` when the row exposes no such text.
+fn row_last_activity(row: AXUIElementRef) -> Option<String> {
+    let cell = child_elements(row, ATTR_CHILDREN)
+        .into_iter()
+        .find(|c| role_of(c.as_raw()) == ROLE_CELL)?;
+    child_elements(cell.as_raw(), ATTR_CHILDREN)
+        .into_iter()
+        .filter(|c| role_of(c.as_raw()) == ROLE_STATIC_TEXT)
+        .filter_map(|t| attr_string(t.as_raw(), ATTR_VALUE))
+        .map(|value| value.trim().to_string())
+        .find(|value| is_activity_stamp(value))
+}
+
+/// Whether a row's static text is the last-message stamp rather than a name or
+/// an unread badge: a clock time, a relative day, or an absolute date.
+fn is_activity_stamp(value: &str) -> bool {
+    if value.contains("오전")
+        || value.contains("오후")
+        || value.contains("AM")
+        || value.contains("PM")
+    {
+        return true;
+    }
+    if matches!(value, "어제" | "오늘" | "Yesterday" | "Today") {
+        return true;
+    }
+    // "7월 22일" is what an older row actually shows.
+    if value.contains('월') && value.contains('일') && value.chars().any(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    // Date-like forms with separators, but never a bare unread count.
+    !value.is_empty()
+        && value.chars().any(|c| matches!(c, '.' | '/' | '-' | ':'))
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '/' | '-' | ':' | ' '))
+}
+
+/// Pick the one row that is the target, or say why that cannot be decided.
+fn choose_row<'a>(rows: &'a [AxRef], target: &RoomTarget) -> Result<&'a AxRef, SendError> {
+    let named: Vec<&AxRef> = rows
+        .iter()
+        .filter(|r| row_room_name(r.as_raw()).is_some_and(|name| room_matches(&name, &target.name)))
+        .collect();
+    match named.len() {
+        0 => Err(SendError::RoomNotInChatList {
+            room: target.name.clone(),
+            scanned: rows.len(),
+        }),
+        1 => Ok(named[0]),
+        _ => {
+            // Same name, more than one room. The last-message column is the only
+            // thing on screen that tells them apart.
+            if let Some(stamp) = &target.last_activity {
+                let exact: Vec<&&AxRef> = named
+                    .iter()
+                    .filter(|r| row_last_activity(r.as_raw()).as_deref() == Some(stamp.as_str()))
+                    .collect();
+                if exact.len() == 1 {
+                    return Ok(exact[0]);
+                }
+            }
+            Err(SendError::AmbiguousRoom {
+                room: target.name.clone(),
+                count: named.len(),
+            })
+        }
+    }
+}
+
 /// A room title reduced to its members, order-independent.
 ///
 /// KakaoTalk titles a room with no name by listing its members, and it does not
@@ -884,40 +1023,33 @@ fn describe_value(text: &str) -> String {
     format!("{text:?} [{points}]")
 }
 
-/// Write `text` into `element`'s `AXValue` and prove it arrived unchanged.
+/// Type `text` as real keystrokes, the way a person would.
 ///
-/// Setting an accessibility value is not a promise the app stored what was
-/// sent: it can be reformatted, truncated, appended to whatever was already
-/// there, or quietly rejected. Reading it back is the only way to know, and
-/// without that check a wrong value silently becomes a wrong action — a search
-/// field holding something other than the room name finds the wrong room.
+/// Setting `AXValue` on KakaoTalk's search field paints the text but never tells
+/// the app anything happened: the clear button stays hidden and the list never
+/// filters. So the search strategy silently did nothing — it timed out and fell
+/// through to scanning the unfiltered list, which is how a row far enough down
+/// to be scrolled off screen ended up being clicked at coordinates nobody could
+/// see.
 ///
-/// Not usable on a KakaoTalk compose box: writing that sends immediately, so
-/// the field is empty by the time it could be read.
-fn set_value_verified(element: AXUIElementRef, text: &str, what: &str) -> Result<(), SendError> {
-    let key = CFString::new(ATTR_VALUE);
-    let value = CFString::new(text);
-    let err = unsafe {
-        AXUIElementSetAttributeValue(element, key.as_concrete_TypeRef(), value.as_CFTypeRef())
-    };
-    if err != AX_SUCCESS {
-        return Err(SendError::SetValueFailed(err));
-    }
-    // A field can take a moment to settle, so give it a few reads before
-    // calling it a mismatch.
-    let mut actual = String::new();
-    for _ in 0..10 {
-        actual = attr_string(element, ATTR_VALUE).unwrap_or_default();
-        if actual == text {
-            return Ok(());
+/// `CGEventKeyboardSetUnicodeString` carries the characters on the event itself,
+/// so this needs no keyboard-layout mapping and works for Hangul as written.
+fn type_text(text: &str) -> Result<(), SendError> {
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| SendError::KeyEventFailed)?;
+    for chunk in text.chars() {
+        let mut buf = [0u16; 2];
+        let encoded = chunk.encode_utf16(&mut buf);
+        for key_down in [true, false] {
+            let event = CGEvent::new_keyboard_event(source.clone(), 0, key_down)
+                .map_err(|_| SendError::KeyEventFailed)?;
+            event.set_string_from_utf16_unchecked(encoded);
+            tag_synthetic(&event);
+            event.post(CGEventTapLocation::HID);
         }
-        std::thread::sleep(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(8));
     }
-    Err(SendError::ValueMismatch {
-        what: what.to_string(),
-        wrote: describe_value(text),
-        found: describe_value(&actual),
-    })
+    Ok(())
 }
 
 /// Depth-limited search for the first descendant matching `role`.
@@ -970,12 +1102,12 @@ fn find_confirm_button(sheet: AXUIElementRef) -> Option<AxRef> {
 /// the user's own input, only after its frontmost state is confirmed, and with both the
 /// previous app and the clipboard put back afterwards.
 pub fn send_image_to_open_window(
-    room: &str,
+    target: &RoomTarget,
     image_path: &Path,
     allow_open: bool,
     ctx: &SendContext,
 ) -> Result<(), SendError> {
-    validate_room_name(room)?;
+    validate_room_name(&target.name)?;
     if !unsafe { AXIsProcessTrusted() } {
         return Err(SendError::AccessibilityDenied);
     }
@@ -996,7 +1128,7 @@ pub fn send_image_to_open_window(
     }
     let pid = kakaotalk_pid().ok_or(SendError::NotRunning)?;
     let app = AxRef(unsafe { AXUIElementCreateApplication(pid) });
-    let window = resolve_window(&app, room, allow_open, ctx)?;
+    let window = resolve_window(&app, target, allow_open, ctx)?;
 
     let clipboard = ClipboardRestore::capture()?;
     if clipboard.unreadable_flavors() > 0 {
@@ -1011,7 +1143,7 @@ pub fn send_image_to_open_window(
     let _hold = take_screen(
         pid,
         ctx,
-        &format!("{room} · {}", attachment_label(image_path)),
+        &format!("{} · {}", target.name, attachment_label(image_path)),
     )?;
 
     if let Some(compose) = compose_box(window.as_raw()) {
@@ -1218,7 +1350,7 @@ fn is_row_metadata(value: &str) -> bool {
 fn open_room_from_chat_list(
     app: &AxRef,
     windows: &[AxRef],
-    room: &str,
+    target: &RoomTarget,
     max_rows: usize,
     pid: i32,
 ) -> Result<(), SendError> {
@@ -1232,16 +1364,13 @@ fn open_room_from_chat_list(
     // Each name costs several AX round trips, so a bounded prefix keeps the fast path fast and
     // leaves the long tail to search.
     let scanned = rows.len().min(max_rows);
-    let target = rows
+    let window: Vec<AxRef> = rows
         .iter()
         .take(scanned)
-        .find(|r| row_room_name(r.as_raw()).is_some_and(|name| room_matches(&name, room)))
-        .ok_or(SendError::RoomNotInChatList {
-            room: room.to_string(),
-            scanned,
-        })?;
-
-    open_row_by_click(app, windows, target.as_raw(), room, pid)
+        .map(|r| AxRef::retained(r.as_raw()))
+        .collect();
+    let hit = choose_row(&window, target)?;
+    open_row_by_click(app, windows, hit.as_raw(), target, pid)
 }
 
 /// Screen frame of an element, or `None` when it exposes no geometry.
@@ -1288,7 +1417,7 @@ fn open_row_by_click(
     _app: &AxRef,
     windows: &[AxRef],
     row: AXUIElementRef,
-    room: &str,
+    target: &RoomTarget,
     pid: i32,
 ) -> Result<(), SendError> {
     // A click lands on whatever window is on top at those coordinates, so the list has to be
@@ -1309,14 +1438,14 @@ fn open_row_by_click(
     // opened another. Sending is protected downstream by the window-title check,
     // but opening the wrong person's chat is its own harm, so this fails and
     // lets the caller retry against a settled list.
-    if !row_room_name(row).is_some_and(|name| room_matches(&name, room)) {
+    if !row_room_name(row).is_some_and(|name| room_matches(&name, &target.name)) {
         return Err(SendError::ChatListMoved {
-            room: room.to_string(),
+            room: target.name.clone(),
         });
     }
 
     // Read geometry after raising: the row can move as the window comes forward.
-    let rect = frame_of(row).ok_or_else(|| SendError::RoomOpenFailed(room.to_string()))?;
+    let rect = frame_of(row).ok_or_else(|| SendError::RoomOpenFailed(target.name.clone()))?;
 
     let target = CGPoint::new(
         rect.origin.x + rect.size.width / 2.0,
@@ -1392,7 +1521,7 @@ fn search_field(window: AXUIElementRef) -> Option<AxRef> {
 fn open_room_via_search(
     app: &AxRef,
     windows: &[AxRef],
-    room: &str,
+    target: &RoomTarget,
     pid: i32,
 ) -> Result<(), SendError> {
     let main = main_window(windows).ok_or(SendError::ChatListUnavailable)?;
@@ -1400,8 +1529,46 @@ fn open_room_via_search(
 
     // Verified rather than fire-and-forget: whatever ends up in this box is what
     // decides which conversation gets opened.
-    let query = search_query_for(room);
-    set_value_verified(field.as_raw(), &query, "the chat search box")?;
+    let query = search_query_for(&target.name);
+    // Focus first: typing goes wherever the app thinks focus is.
+    let focus_key = CFString::new(ATTR_FOCUSED);
+    let yes = core_foundation::boolean::CFBoolean::true_value();
+    unsafe {
+        AXUIElementSetAttributeValue(
+            field.as_raw(),
+            focus_key.as_concrete_TypeRef(),
+            yes.as_CFTypeRef(),
+        )
+    };
+    // Clearing through AXValue is fine — it is only the *change* notification
+    // the app misses, and an empty box is the state we want anyway.
+    let empty = CFString::new("");
+    let key = CFString::new(ATTR_VALUE);
+    unsafe {
+        AXUIElementSetAttributeValue(
+            field.as_raw(),
+            key.as_concrete_TypeRef(),
+            empty.as_CFTypeRef(),
+        )
+    };
+    front_then(pid, || type_text(&query))??;
+    // Prove the field ended up holding the query; if the keystrokes went
+    // somewhere else this says so instead of silently filtering nothing.
+    let mut landed = false;
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(50));
+        if attr_string(field.as_raw(), ATTR_VALUE).as_deref() == Some(query.as_str()) {
+            landed = true;
+            break;
+        }
+    }
+    if !landed {
+        return Err(SendError::ValueMismatch {
+            what: "the chat search box".to_string(),
+            wrote: describe_value(&query),
+            found: describe_value(&attr_string(field.as_raw(), ATTR_VALUE).unwrap_or_default()),
+        });
+    }
 
     // Results replace the chat-list rows. Wait for a row that actually reads back
     // as the requested room.
@@ -1425,14 +1592,15 @@ fn open_room_via_search(
         if rows.is_empty() || rows.len() == full_list {
             continue; // filtering has not taken effect yet
         }
-        if let Some(hit) = rows
-            .iter()
-            .find(|r| row_room_name(r.as_raw()).is_some_and(|name| room_matches(&name, room)))
-        {
-            return open_row_by_click(app, windows, hit.as_raw(), room, pid);
+        match choose_row(&rows, target) {
+            Ok(hit) => return open_row_by_click(app, windows, hit.as_raw(), target, pid),
+            // Two rooms of this name and nothing to tell them apart: waiting
+            // will not change that, so stop rather than retry.
+            Err(err @ SendError::AmbiguousRoom { .. }) => return Err(err),
+            Err(_) => continue,
         }
     }
-    Err(SendError::RoomNotFound(room.to_string()))
+    Err(SendError::RoomNotFound(target.name.clone()))
 }
 
 /// Clear the search box so the user's chat list is left exactly as it was found.
@@ -1484,25 +1652,40 @@ fn clear_search(windows: &[AxRef]) {
 /// Find the chat window for `room`, opening it from the chat list when it is not already up.
 fn resolve_window(
     app: &AxRef,
-    room: &str,
+    target: &RoomTarget,
     allow_open: bool,
     ctx: &SendContext,
 ) -> Result<AxRef, SendError> {
     let find = || {
         let windows = child_elements(app.as_raw(), ATTR_WINDOWS);
-        let hit = windows.iter().position(|w| {
-            attr_string(w.as_raw(), ATTR_TITLE).is_some_and(|title| room_matches(&title, room))
-        });
-        (windows, hit)
+        let hits: Vec<usize> = windows
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| {
+                attr_string(w.as_raw(), ATTR_TITLE)
+                    .is_some_and(|title| room_matches(&title, &target.name))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        (windows, hits)
     };
 
-    let (windows, hit) = find();
-    if let Some(i) = hit {
-        return Ok(AxRef::retained(windows[i].as_raw()));
+    let (windows, hits) = find();
+    // An already-open window is the fast path, but two rooms sharing a name can
+    // each have one, and a window title carries no more identity than a list row
+    // does. Refuse for the same reason.
+    if hits.len() > 1 {
+        return Err(SendError::AmbiguousRoom {
+            room: target.name.clone(),
+            count: hits.len(),
+        });
+    }
+    if let Some(i) = hits.first() {
+        return Ok(AxRef::retained(windows[*i].as_raw()));
     }
     if !allow_open {
         return Err(SendError::WindowNotOpen {
-            room: room.to_string(),
+            room: target.name.clone(),
             open: open_titles(&windows),
         });
     }
@@ -1519,14 +1702,14 @@ fn resolve_window(
 
     let mut pid: i32 = 0;
     if unsafe { AXUIElementGetPid(app.as_raw(), &mut pid) } != AX_SUCCESS {
-        return Err(SendError::RoomOpenFailed(room.to_string()));
+        return Err(SendError::RoomOpenFailed(target.name.clone()));
     }
 
     // Opening a room means clicking a list row, and a click only reaches KakaoTalk
     // while it is frontmost. The screen is therefore taken once and held across
     // every attempt, not grabbed and released per attempt, which both tripled
     // the wall clock and yanked focus away while the window was still coming up.
-    let hold = take_screen(pid, ctx, &format!("{room} 채팅방 여는 중"))?;
+    let hold = take_screen(pid, ctx, &format!("{} 채팅방 여는 중", target.name))?;
 
     for attempt in 0..3 {
         // Checked per attempt so Esc stops the run at the next boundary instead
@@ -1545,9 +1728,9 @@ fn resolve_window(
         // row removes the race rather than narrowing it, because there is
         // nothing left to reorder.
         let outcome = match attempt {
-            0 => open_room_via_search(app, &windows, room, pid),
-            1 => open_room_from_chat_list(app, &windows, room, RECENT_ROWS, pid),
-            _ => open_room_from_chat_list(app, &windows, room, usize::MAX, pid),
+            0 => open_room_via_search(app, &windows, target, pid),
+            1 => open_room_from_chat_list(app, &windows, target, RECENT_ROWS, pid),
+            _ => open_room_from_chat_list(app, &windows, target, usize::MAX, pid),
         };
         match outcome {
             Ok(()) => match wait_for_window(&find, 20) {
@@ -1557,7 +1740,7 @@ fn resolve_window(
                 }
                 // Selected it but nothing opened — record that, do not let an earlier,
                 // less relevant error be the one reported.
-                None => last = Some(SendError::RoomOpenFailed(room.to_string())),
+                None => last = Some(SendError::RoomOpenFailed(target.name.clone())),
             },
             Err(e) => last = Some(e),
         }
@@ -1569,17 +1752,18 @@ fn resolve_window(
     // Explicit so the screen is handed back before the error surfaces, rather
     // than at some later point in the caller's scope.
     drop(hold);
-    Err(last.unwrap_or_else(|| SendError::RoomOpenFailed(room.to_string())))
+    Err(last.unwrap_or_else(|| SendError::RoomOpenFailed(target.name.clone())))
 }
 
 fn wait_for_window<F>(find: &F, attempts: u32) -> Option<AxRef>
 where
-    F: Fn() -> (Vec<AxRef>, Option<usize>),
+    F: Fn() -> (Vec<AxRef>, Vec<usize>),
 {
     for _ in 0..attempts {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let (windows, hit) = find();
-        if let Some(i) = hit {
+        std::thread::sleep(Duration::from_millis(100));
+        let (windows, hits) = find();
+        // Exactly one, for the same reason the first lookup insists on it.
+        if let [i] = hits[..] {
             return Some(AxRef::retained(windows[i].as_raw()));
         }
     }
@@ -1609,21 +1793,21 @@ fn kakaotalk_pid() -> Option<i32> {
 /// drained, i.e. KakaoTalk actually accepted the Enter — a stale success would otherwise look
 /// identical to a silently dropped message.
 pub fn send_to_open_window(
-    room: &str,
+    target: &RoomTarget,
     text: &str,
     allow_open: bool,
     ctx: &SendContext,
 ) -> Result<(), SendError> {
-    validate_room_name(room)?;
+    validate_room_name(&target.name)?;
     if !unsafe { AXIsProcessTrusted() } {
         return Err(SendError::AccessibilityDenied);
     }
     let pid = kakaotalk_pid().ok_or(SendError::NotRunning)?;
     let app = AxRef(unsafe { AXUIElementCreateApplication(pid) });
-    let window = resolve_window(&app, room, allow_open, ctx)?;
+    let window = resolve_window(&app, target, allow_open, ctx)?;
 
     let compose = compose_box(window.as_raw())
-        .ok_or_else(|| SendError::ComposeBoxNotFound(room.to_string()))?;
+        .ok_or_else(|| SendError::ComposeBoxNotFound(target.name.clone()))?;
 
     // Make the compose box the app's focused element before typing. Enter is delivered to
     // KakaoTalk as a whole, and KakaoTalk routes it to whatever it considers focused — with
@@ -1678,7 +1862,7 @@ pub fn send_to_open_window(
     // is worth it over leaving a message sitting unsent in the box — but only during a gap in
     // their input, and only if KakaoTalk verifiably comes forward. A global Enter fired while
     // the user is back in their own app would submit whatever they were in the middle of.
-    let _hold = take_screen(pid, ctx, &format!("{room} 로 전송 중"))?;
+    let _hold = take_screen(pid, ctx, &format!("{} 로 전송 중", target.name))?;
     let raise = CFString::new(ACTION_RAISE);
     unsafe { AXUIElementPerformAction(window.as_raw(), raise.as_concrete_TypeRef()) };
     std::thread::sleep(Duration::from_millis(200));
@@ -1699,17 +1883,17 @@ pub fn send_to_open_window(
 
 /// Resolve (opening if needed) the chat window for `room` without sending anything.
 pub fn resolve_room_window(
-    room: &str,
+    target: &RoomTarget,
     allow_open: bool,
     ctx: &SendContext,
 ) -> Result<(), SendError> {
-    validate_room_name(room)?;
+    validate_room_name(&target.name)?;
     if !unsafe { AXIsProcessTrusted() } {
         return Err(SendError::AccessibilityDenied);
     }
     let pid = kakaotalk_pid().ok_or(SendError::NotRunning)?;
     let app = AxRef(unsafe { AXUIElementCreateApplication(pid) });
-    resolve_window(&app, room, allow_open, ctx).map(|_| ())
+    resolve_window(&app, target, allow_open, ctx).map(|_| ())
 }
 
 /// Room names from the chat list, newest first. Used to find the exact name to pass to `--room`.
