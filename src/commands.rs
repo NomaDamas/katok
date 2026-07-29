@@ -92,6 +92,8 @@ pub(crate) fn run(
             limit,
             dry_run,
             no_open,
+            take_focus_now,
+            focus_wait,
             json,
         } => run_send(
             &room,
@@ -102,6 +104,8 @@ pub(crate) fn run(
             limit,
             dry_run,
             no_open,
+            take_focus_now,
+            focus_wait,
             json,
         ),
     }
@@ -118,6 +122,8 @@ fn run_send(
     limit: usize,
     dry_run: bool,
     no_open: bool,
+    take_focus_now: bool,
+    focus_wait: u64,
     json: bool,
 ) -> Result<()> {
     use katok::kakao::ax_send;
@@ -133,18 +139,76 @@ fn run_send(
     }
 
     let allow_open = !no_open;
+    // Anything that has to bring KakaoTalk forward waits for a gap in the user's
+    // own typing first, so a send never lands mid-keystroke.
+    let policy = if take_focus_now {
+        ax_send::FocusPolicy::immediate()
+    } else {
+        ax_send::FocusPolicy {
+            max_wait: std::time::Duration::from_secs(focus_wait),
+            ..ax_send::FocusPolicy::default()
+        }
+    };
+
+    // Read stdin before the curtain goes up: a blocked terminal behind a
+    // full-screen overlay waiting for input the user cannot give would be a
+    // deadlock they can only escape by killing the process.
+    let body = if dry_run || image.is_some() {
+        None
+    } else {
+        let body = match text {
+            Some(t) => t,
+            None => {
+                let mut buf = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut buf)
+                    .context("failed to read message body from stdin")?;
+                buf
+            }
+        };
+        let body = body.trim_end_matches('\n').to_string();
+        if body.is_empty() {
+            anyhow::bail!("refusing to send an empty message");
+        }
+        Some(body)
+    };
+
+    // The curtain owns the main thread — AppKit insists on it — so the send runs
+    // on a worker. It only actually covers the screen for the steps that must
+    // bring KakaoTalk forward; an ordinary background text send never raises it.
+    let room_owned = room.to_string();
+    let image_owned = image.clone();
+    let body_owned = body.clone();
+    let outcome =
+        katok::kakao::send_curtain::run_with_curtain("카톡 전송중…", move |curtain| {
+            let ctx = ax_send::SendContext {
+                policy,
+                curtain: Some(curtain),
+            };
+            if dry_run {
+                return ax_send::resolve_room_window(&room_owned, allow_open, &ctx);
+            }
+            if let Some(path) = &image_owned {
+                return ax_send::send_image_to_open_window(&room_owned, path, allow_open, &ctx);
+            }
+            let body = body_owned.expect("text body prepared before the curtain");
+            ax_send::send_to_open_window(&room_owned, &body, allow_open, &ctx)
+        });
+
+    match outcome {
+        Ok(result) => result?,
+        // The worker panicked. Input and focus were already handed back by the
+        // curtain's own scope guards, so report rather than resume it.
+        Err(_) => anyhow::bail!("the send thread panicked; nothing was confirmed sent"),
+    }
 
     if dry_run {
-        // Opening a room is harmless, so this proves targeting end-to-end without sending.
-        ax_send::resolve_room_window(room, allow_open)?;
         return print_payload(
             json,
             &serde_json::json!({ "resolved": true, "room": room, "sent": false }),
         );
     }
-
     if let Some(path) = image {
-        ax_send::send_image_to_open_window(room, &path, allow_open)?;
         // Report the file name only; the path can leak directory structure into logs.
         let name = path
             .file_name()
@@ -155,27 +219,11 @@ fn run_send(
             &serde_json::json!({ "sent": true, "room": room, "image": name }),
         );
     }
-
-    let body = match text {
-        Some(t) => t,
-        None => {
-            let mut buf = String::new();
-            std::io::stdin()
-                .read_to_string(&mut buf)
-                .context("failed to read message body from stdin")?;
-            buf
-        }
-    };
-    let body = body.trim_end_matches('\n');
-    if body.is_empty() {
-        anyhow::bail!("refusing to send an empty message");
-    }
-
-    ax_send::send_to_open_window(room, body, allow_open)?;
     // Never echo the body: sent content is as sensitive as anything else this crate handles.
+    let chars = body.map(|b| b.chars().count()).unwrap_or(0);
     print_payload(
         json,
-        &serde_json::json!({ "sent": true, "room": room, "chars": body.chars().count() }),
+        &serde_json::json!({ "sent": true, "room": room, "chars": chars }),
     )
 }
 

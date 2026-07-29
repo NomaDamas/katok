@@ -1,6 +1,6 @@
 ---
 name: katok-send
-description: 'Send KakaoTalk messages and images from the CLI on macOS with `katok send`. Opens the target room itself when its window is closed. Text sends in ~0.2s WITHOUT stealing focus, so the user can keep working; images need KakaoTalk to come forward briefly. Native to katok — no third-party binary. Triggers (KR/EN): 카톡 보내줘, 카톡방에 전송, 카톡 발송, 카톡으로 이미지 보내, send a kakao message, kakao send image.'
+description: 'Send KakaoTalk messages and images from the CLI on macOS with `katok send`. Opens the target room itself when its window is closed. Text into an open window sends in ~0.2s WITHOUT stealing focus, so the user can keep working; images and room-opening need the screen for ~2s behind a visible curtain that blocks input so the send cannot collide with the user. Native to katok — no third-party binary. Triggers (KR/EN): 카톡 보내줘, 카톡방에 전송, 카톡 발송, 카톡으로 이미지 보내, send a kakao message, kakao send image.'
 ---
 
 # katok-send
@@ -20,25 +20,38 @@ katok send --room x --list-windows --json               # chat windows currently
 katok send --room "<window title>" --dry-run            # resolve and open, send nothing
 ```
 
-When the window is closed, katok finds the room in the chat list and opens it. A recent room near the top of the list opens in about 0.4s and does not steal focus.
+When the window is closed, katok finds the room in the chat list and opens it. That needs the screen for a moment and so runs behind the curtain described below; a recent room near the top of the list takes about 2s end to end. Once the window is open it stays open, and sending text into it afterwards touches nothing.
 
 - `--room` must match the name shown in the chat list exactly. Confirm it with `--list-rooms`.
 - The self-chat window is titled with your own nickname, not "나와의 채팅".
 - `--no-open` fails with exit 1 instead of opening a closed window. Use it for automation that must never disturb the screen.
 - `--dry-run` resolves and opens the room but sends nothing. Use it to verify targeting.
+- `--take-focus-now` skips waiting for the user to stop typing. Use it when nobody is at the keyboard.
+- `--focus-wait <seconds>` bounds that wait, default 15.
 
 Rooms far down the chat list open unreliably. A room near the top is opened by clicking its row directly, but a room further down has to go through search, and KakaoTalk populates those rows late, so the lookup sometimes fails. The failure is explicit (exit 1), never silent. Once a person opens such a room by hand it stays reachable.
 
 ## Text and images behave differently
 
-| | Text | Image |
+| | Text into an open window | Image, or opening a closed room |
 |---|---|---|
 | Duration | ~0.2s | ~2s |
-| User's screen | untouched | KakaoTalk comes forward briefly |
+| User's screen | untouched | curtain covers it, input blocked |
 
-Text is written into `AXValue` directly and only the Enter key is delivered to the KakaoTalk process with `CGEventPostToPid`, so the app never has to be activated. Images cannot work that way: paste (Cmd+V) is a menu shortcut, which the app only handles while it is frontmost, and a pid-targeted event is silently ignored. The image path therefore activates KakaoTalk.
+Text is written into `AXValue` directly and only the Enter key is delivered to the KakaoTalk process with `CGEventPostToPid`, so the app never has to be activated. Images cannot work that way: paste (Cmd+V) is a menu shortcut, which the app only handles while it is frontmost, and a pid-targeted event is silently ignored. Opening a closed room is the same story — its chat-list rows ignore `AXPress` and Enter, so only a real double-click works, and a click only reaches KakaoTalk while it is frontmost.
 
-Prefer text for unattended automation. Send images only when the user is away from the screen, or when a brief focus change is acceptable.
+## The curtain
+
+For the second or two a send needs the screen, katok covers every display with a "카톡 전송중" curtain and swallows real keyboard and mouse input, letting through only the events it synthesizes itself.
+
+This exists because the old failure was worse than a failed send. A global keystroke goes to whichever application is frontmost at that instant, so if the user clicked away between KakaoTalk being activated and Cmd+V being posted, the image pasted into *their* document. Blocking input removes the race rather than narrowing it.
+
+- **Esc, or clicking the cancel button, stops the run.** Cancelling before the paste sends nothing. Cancelling after it reports `CancelledAfterPaste`, because at that point delivery is genuinely unknown — check the chat rather than resending blindly.
+- **Blocked input is dropped, not queued.** That is exactly why the block is always visible: a silent block would eat whatever the user typed into it. There is no block-without-showing mode, and asking for one is asking to lose someone's keystrokes.
+- **A send waits for a gap in the user's typing before taking the screen.** If they keep typing for `--focus-wait` seconds (default 15) the send fails without ever taking focus, reporting that nothing was sent and nothing was typed anywhere. `--take-focus-now` skips the wait for unattended runs.
+- **Everything is put back.** The previously active application is reactivated and the clipboard — which the image path has to overwrite, since KakaoTalk exposes no AX affordance for attaching a file — is saved and restored, on every exit path including failures.
+
+Prefer text into an already-open window for unattended automation: it is the only path that touches nothing. Keeping the target room's window open is what makes that the common case.
 
 ## Reporting success
 

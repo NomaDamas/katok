@@ -131,6 +131,32 @@ So `not-cached` is a legitimate self-correcting state — open the photo in the 
 re-run. It is a fetch gap, not a decryption failure, which is why `decrypt-failed` stays
 reserved for a file that exists and fails to decrypt.
 
+## File attachments (type 18) have no local tier
+
+One message type carries every non-photo, non-video attachment. A sample of 762
+rows on the reference install broke down as pdf 375, xlsx 68, html 52, zip 46,
+md 46, docx 33, hwp 24, pptx 16, mp4 14, hwpx 11, xls 10, csv 10, wav 8, mp3 7,
+ai 7. So supporting "every format" is one message type, not one branch per
+extension.
+
+The attachment JSON is `{name, size, s, cs, url, expire, k}`: `name` is the
+original filename, `s`/`size` the byte length, `cs` a SHA-1 of the plaintext
+body written in **uppercase** hex (photos use lowercase, so the comparison has
+to be case-insensitive), and `url` the presigned CDN link.
+
+**Nothing is cached locally.** A full extension histogram of every account
+directory in the container returned `.thm` 7283, `.img` 2584, `.vid` 88, `.txt`
+4 — not a single pdf or zip. So the tier ladder for a file is the CDN alone;
+there is no Pkv2 decryption step, and a stub record says `unavailable` rather
+than `not-cached`, because no cache could have held it in the first place.
+
+Verified end to end: a 105 KB pdf fetched from its presigned URL hashed to
+exactly its `cs`, and a 313 MB zip answered a Range request with 206 and
+`PK\x03\x04`, so large attachments can be fetched incrementally.
+
+`name` is the authority for the output extension. A zip body sniffs as `.bin`
+through `image_ext`, so sniffing would silently mangle every archive.
+
 ## CDN tier
 
 Every image attachment carries its own presigned CDN URL (`url` for a single photo,
@@ -139,6 +165,18 @@ parameters, valid roughly three days from send. When the full image is not cache
 locally, the resolver fetches that URL and keeps the bytes only if `sha1(body) == cs`.
 This is the only network access in the crate, and `--no-cdn` turns it off for a purely
 local run.
+
+The signature window is about 14 days for a file attachment, and an expired URL
+answers 410 rather than hanging or returning a login page. On the reference
+install only 74 of 762 file attachments and 50 of 1266 videos were still live,
+so retroactive collection is mostly impossible — the value of the feature is in
+fetching inside the window, which is what `media backfill` is for.
+
+`Body::read_to_vec()` applies its own 10 MB cap. Leaving it at the default
+turned every video and file above that size into a `cdn-failed` record even
+though the URL was good, so the limit is passed explicitly, and an attachment
+whose declared `s` exceeds the cap is refused before any request rather than
+after downloading it.
 
 **An attachment with no `cs` skips the tier entirely.** There would be nothing to check
 a fetched body against, and writing unverified network bytes under a contract that

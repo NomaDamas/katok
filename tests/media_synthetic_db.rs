@@ -16,7 +16,7 @@ use katok::kakao::{
         MediaDirs,
     },
     media_resolver::{
-        resolve_media_frames_with_fetcher, MediaRecord, MediaResolveOptions, MediaTier,
+        resolve_media_frames_with_fetcher, MediaKind, MediaRecord, MediaResolveOptions, MediaTier,
     },
     read_media_frames_with_options, AuthOptions, MediaQuery,
 };
@@ -35,9 +35,21 @@ const LOG_CDN: i64 = 10_002;
 const LOG_THUMB_AFTER_CDN_MISMATCH: i64 = 10_003;
 const LOG_STUB: i64 = 10_004;
 const LOG_ALBUM: i64 = 10_005;
+const LOG_FILE: i64 = 10_006;
+const LOG_FILE_EXPIRED: i64 = 10_007;
+const LOG_FILE_HUGE: i64 = 10_008;
 
 const CDN_URL: &str = "https://cdn.example/full.jpg?expires=1900000000";
 const MISMATCH_URL: &str = "https://cdn.example/mismatch.jpg?expires=1900000000&secret=redacted";
+const FILE_URL: &str = "https://cdn.example/f_abc.zip?expires=1900000000";
+const FILE_EXPIRED_URL: &str = "https://cdn.example/f_old.zip?expires=1000";
+const FILE_HUGE_URL: &str = "https://cdn.example/f_huge.zip?expires=1900000000";
+
+/// A zip body deliberately sniffs as `.bin`, which is why a file attachment
+/// takes its extension from the attachment name instead.
+const FILE_BODY: &[u8] = b"PK\x03\x04KATOK-ZIP-BODY";
+/// KakaoTalk writes a file attachment's `cs` in uppercase hex, unlike a photo's.
+const FILE_NAME: &str = "분기 보고서.zip";
 
 const FULL_IMAGE: &[u8] = b"\xff\xd8\xff\xe0KATOK-FULL\xff\xd9";
 const CDN_IMAGE: &[u8] = b"\xff\xd8\xff\xe0KATOK-CDN\xff\xd9";
@@ -172,6 +184,61 @@ fn insert_media_rows(conn: &Connection) {
         params![CHAT_ID, LOG_ALBUM, 5_i64, AUTHOR_ID, 1_700_000_005_i64, attachment],
     )
     .expect("insert album row");
+
+    insert_file(
+        conn,
+        LOG_FILE,
+        6,
+        1_700_000_006,
+        FILE_NAME,
+        FILE_BODY.len() as i64,
+        Some(FILE_URL),
+    );
+    insert_file(
+        conn,
+        LOG_FILE_EXPIRED,
+        7,
+        1_700_000_007,
+        "지난달 자료.pdf",
+        4096,
+        Some(FILE_EXPIRED_URL),
+    );
+    insert_file(
+        conn,
+        LOG_FILE_HUGE,
+        8,
+        1_700_000_008,
+        "영상 원본.zip",
+        4_000_000_000,
+        Some(FILE_HUGE_URL),
+    );
+}
+
+/// Insert a `type 18` generic file row, shaped like a real one: an original
+/// `name`, a declared `size`, and an uppercase `cs`.
+fn insert_file(
+    conn: &Connection,
+    log_id: i64,
+    msg_id: i64,
+    sent_at: i64,
+    name: &str,
+    size: i64,
+    url: Option<&str>,
+) {
+    let attachment = serde_json::json!({
+        "name": name,
+        "size": size,
+        "s": size,
+        "cs": sha1_hex(FILE_BODY).to_uppercase(),
+        "url": url,
+    })
+    .to_string();
+    conn.execute(
+        "INSERT INTO NTChatMessage(chatId, logId, msgId, authorId, type, sentAt, attachment, supplement, message)
+         VALUES (?1, ?2, ?3, ?4, 18, ?5, ?6, NULL, '')",
+        params![CHAT_ID, log_id, msg_id, AUTHOR_ID, sent_at, attachment],
+    )
+    .expect("insert file row");
 }
 
 fn insert_photo(
@@ -208,10 +275,13 @@ fn auth_options(fixture: &Fixture) -> AuthOptions {
 }
 
 fn media_query(log_id: Option<i64>) -> MediaQuery {
+    MediaQuery::new(CHAT_ID, log_id, 100)
+}
+
+fn media_query_of(log_id: Option<i64>, kinds: &[MediaKind]) -> MediaQuery {
     MediaQuery {
-        chat_id: CHAT_ID,
-        log_id,
-        limit: 100,
+        kinds: kinds.to_vec(),
+        ..MediaQuery::new(CHAT_ID, log_id, 100)
     }
 }
 
@@ -281,8 +351,13 @@ fn record(
 #[test]
 fn synthetic_db_media_pipeline_resolves_full_cdn_thumb_stub_and_album_frames() {
     let fixture = create_fixture();
-    let frames = read_media_frames_with_options(&auth_options(&fixture), &media_query(None))
-        .expect("read frames");
+    // Scoped to photos so the file rows in the same fixture do not change the
+    // tier counts this test is about; file behaviour has its own tests below.
+    let frames = read_media_frames_with_options(
+        &auth_options(&fixture),
+        &media_query_of(None, &[MediaKind::Photo]),
+    )
+    .expect("read frames");
 
     assert_eq!(frames.len(), 6);
     assert!(frames
@@ -296,7 +371,7 @@ fn synthetic_db_media_pipeline_resolves_full_cdn_thumb_stub_and_album_frames() {
         &frames,
         &fixture.media_dirs,
         &resolve_options(fixture.output_dir.clone()),
-        move |url, timeout| {
+        move |url, timeout, _| {
             calls.set(calls.get() + 1);
             assert_eq!(timeout, Duration::from_secs(20));
             match url {
@@ -394,7 +469,7 @@ fn synthetic_db_no_cdn_mode_is_pure_local_and_degrades_to_stub() {
         &frames,
         &fixture.media_dirs,
         &options,
-        move |_, _| {
+        move |_, _, _| {
             calls.set(calls.get() + 1);
             Ok(Vec::new())
         },
@@ -408,4 +483,189 @@ fn synthetic_db_no_cdn_mode_is_pure_local_and_degrades_to_stub() {
     assert_eq!(cdn_disabled.tier, MediaTier::Stub);
     assert_eq!(cdn_disabled.tier_reason, "not-cached");
     assert_eq!(cdn_disabled.path, None);
+}
+
+#[test]
+fn default_query_reads_every_kind_including_files() {
+    let fixture = create_fixture();
+    let frames = read_media_frames_with_options(&auth_options(&fixture), &media_query(None))
+        .expect("read frames");
+
+    // 6 photo frames (4 singles + 2 album) plus the 3 file rows.
+    assert_eq!(frames.len(), 9);
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.kind == MediaKind::File)
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn file_attachment_downloads_from_cdn_under_its_original_name() {
+    let fixture = create_fixture();
+    let frames = read_media_frames_with_options(
+        &auth_options(&fixture),
+        &media_query_of(Some(LOG_FILE), &[MediaKind::File]),
+    )
+    .expect("read file frame");
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].kind, MediaKind::File);
+    assert_eq!(frames[0].filename.as_deref(), Some(FILE_NAME));
+    assert_eq!(frames[0].size_bytes, Some(FILE_BODY.len() as i64));
+
+    let report = resolve_media_frames_with_fetcher(
+        CHAT_ID,
+        &frames,
+        &fixture.media_dirs,
+        &resolve_options(fixture.output_dir.clone()),
+        move |url, _, max_bytes| {
+            assert_eq!(url, FILE_URL);
+            // The fetch cap must reach the fetcher; ureq's own 10 MB default
+            // would otherwise silently truncate large attachments.
+            assert_eq!(max_bytes, 512 * 1024 * 1024);
+            Ok(FILE_BODY.to_vec())
+        },
+    )
+    .expect("resolve file");
+
+    let file = record(&report, LOG_FILE, 0);
+    assert_eq!(file.tier, MediaTier::Cdn);
+    // No local tier was probed, so the reason carries no "full-not-cached".
+    assert_eq!(file.tier_reason, "cdn-fetched");
+    assert_eq!(file.kind, MediaKind::File);
+    assert_eq!(file.name.as_deref(), Some(FILE_NAME));
+    // An uppercase `cs` still verifies.
+    assert_eq!(file.sha1.as_deref(), Some(sha1_hex(FILE_BODY).as_str()));
+
+    let path = file.path.as_ref().expect("file path");
+    assert_eq!(
+        path.file_name().unwrap().to_str().unwrap(),
+        format!("{LOG_FILE}_{FILE_NAME}")
+    );
+    assert_eq!(std::fs::read(path).expect("file output"), FILE_BODY);
+}
+
+#[test]
+fn expired_file_link_is_reported_as_unavailable_without_fetching() {
+    let fixture = create_fixture();
+    let frames = read_media_frames_with_options(
+        &auth_options(&fixture),
+        &media_query_of(Some(LOG_FILE_EXPIRED), &[MediaKind::File]),
+    )
+    .expect("read expired file frame");
+
+    let report = resolve_media_frames_with_fetcher(
+        CHAT_ID,
+        &frames,
+        &fixture.media_dirs,
+        &resolve_options(fixture.output_dir.clone()),
+        |_, _, _| panic!("an expired signature must not be fetched"),
+    )
+    .expect("resolve expired file");
+
+    let expired = record(&report, LOG_FILE_EXPIRED, 0);
+    assert_eq!(expired.tier, MediaTier::Stub);
+    // "not-cached" would imply a local cache that could have held it; a file
+    // never has one.
+    assert_eq!(expired.tier_reason, "unavailable+cdn-expired");
+    assert_eq!(expired.path, None);
+}
+
+#[test]
+fn oversized_attachment_is_refused_before_any_request() {
+    let fixture = create_fixture();
+    let frames = read_media_frames_with_options(
+        &auth_options(&fixture),
+        &media_query_of(Some(LOG_FILE_HUGE), &[MediaKind::File]),
+    )
+    .expect("read huge file frame");
+
+    let report = resolve_media_frames_with_fetcher(
+        CHAT_ID,
+        &frames,
+        &fixture.media_dirs,
+        &resolve_options(fixture.output_dir.clone()),
+        |_, _, _| panic!("an oversized attachment must not be fetched"),
+    )
+    .expect("resolve huge file");
+
+    let huge = record(&report, LOG_FILE_HUGE, 0);
+    assert_eq!(huge.tier, MediaTier::Stub);
+    assert_eq!(huge.tier_reason, "unavailable+cdn-too-large");
+    assert_eq!(report.errors.len(), 1);
+    assert!(report.errors[0].error.contains("above the"));
+    // The signed query string never reaches the report.
+    assert_eq!(report.errors[0].path, "https://cdn.example/f_huge.zip");
+}
+
+#[test]
+fn rerun_skips_an_already_saved_file_without_touching_the_network() {
+    let fixture = create_fixture();
+    let frames = read_media_frames_with_options(
+        &auth_options(&fixture),
+        &media_query_of(Some(LOG_FILE), &[MediaKind::File]),
+    )
+    .expect("read file frame");
+    let options = MediaResolveOptions {
+        skip_existing: true,
+        ..resolve_options(fixture.output_dir.clone())
+    };
+
+    let first = resolve_media_frames_with_fetcher(
+        CHAT_ID,
+        &frames,
+        &fixture.media_dirs,
+        &options,
+        |_, _, _| Ok(FILE_BODY.to_vec()),
+    )
+    .expect("first run");
+    assert_eq!(record(&first, LOG_FILE, 0).tier, MediaTier::Cdn);
+
+    let second = resolve_media_frames_with_fetcher(
+        CHAT_ID,
+        &frames,
+        &fixture.media_dirs,
+        &options,
+        |_, _, _| panic!("a saved attachment must not be fetched again"),
+    )
+    .expect("second run");
+
+    let skipped = record(&second, LOG_FILE, 0);
+    assert_eq!(skipped.tier, MediaTier::Existing);
+    assert_eq!(skipped.tier_reason, "already-present");
+    assert!(skipped.path.as_ref().expect("kept path").is_file());
+}
+
+#[test]
+fn dry_run_previews_the_fetch_without_writing_or_requesting() {
+    let fixture = create_fixture();
+    let frames = read_media_frames_with_options(
+        &auth_options(&fixture),
+        &media_query_of(None, &[MediaKind::File]),
+    )
+    .expect("read file frames");
+    let options = MediaResolveOptions {
+        skip_existing: true,
+        dry_run: true,
+        ..resolve_options(fixture.output_dir.clone())
+    };
+
+    let report = resolve_media_frames_with_fetcher(
+        CHAT_ID,
+        &frames,
+        &fixture.media_dirs,
+        &options,
+        |_, _, _| panic!("a dry run must not fetch"),
+    )
+    .expect("dry run");
+
+    // A preview has to separate "would download" from "gone" — disabling the
+    // CDN tier would collapse both into one stub.
+    assert_eq!(record(&report, LOG_FILE, 0).tier, MediaTier::Planned);
+    assert_eq!(record(&report, LOG_FILE, 0).tier_reason, "cdn-would-fetch");
+    assert_eq!(record(&report, LOG_FILE_EXPIRED, 0).tier, MediaTier::Stub);
+    assert_eq!(record(&report, LOG_FILE_HUGE, 0).tier, MediaTier::Stub);
+    assert!(!fixture.output_dir.exists(), "a dry run writes nothing");
 }

@@ -16,6 +16,8 @@ pub mod media_paths;
 pub mod media_reader;
 pub mod media_resolver;
 pub mod reader;
+#[cfg(target_os = "macos")]
+pub mod send_curtain;
 
 use std::path::PathBuf;
 

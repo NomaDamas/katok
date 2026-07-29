@@ -14,21 +14,49 @@
 //! crawling the chat list or driving the search field, and both are slow enough (~20s, dominated
 //! by per-node AX round trips) that the caller is better off opening the room once and keeping
 //! it open.
+//!
+//! # Colliding with the user
+//!
+//! Two operations cannot avoid activating KakaoTalk: pasting an image (Cmd+V is a menu key
+//! equivalent, and an inactive app has no key window for `paste:` to reach) and opening a closed
+//! room (its list rows ignore both `AXPress` and Enter, so only a real double-click works). That
+//! is unavoidable, but the damage from colliding with the user is not:
+//!
+//! - **Never post a global key on faith.** A global key event goes to whatever is frontmost. If
+//!   the user clicks away between activating KakaoTalk and posting Cmd+V, the image lands in
+//!   *their* document. So frontmost is verified immediately before every global post, and the
+//!   post is abandoned rather than fired blind. A failed send is recoverable; a paste into
+//!   someone else's window is not.
+//! - **Wait for a quiet moment.** Taking focus mid-keystroke is what makes the collision likely
+//!   in the first place, so the run waits for a gap in user input before activating.
+//! - **Put everything back.** The previously frontmost app is reactivated and the clipboard is
+//!   restored, on every exit path including failures.
 
 #![cfg(target_os = "macos")]
 
 use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
 use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+use core_foundation::boolean::{CFBoolean, CFBooleanRef};
 use core_foundation::data::{CFData, CFDataRef};
+use core_foundation::dictionary::{CFDictionaryGetValueIfPresent, CFDictionaryRef};
+use core_foundation::number::{CFNumber, CFNumberRef};
 use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+use core_graphics::window::{
+    copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements,
+    kCGWindowListOptionOnScreenOnly,
+};
 use std::ffi::c_void;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use super::send_curtain::{attachment_label, tag_synthetic, CurtainControl};
 
 type AXUIElementRef = *mut c_void;
 type AXError = i32;
@@ -75,6 +103,7 @@ const PASTEBOARD_CLIPBOARD: &str = "com.apple.pasteboard.clipboard";
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
+    fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
     fn AXUIElementCopyAttributeValue(
         element: AXUIElementRef,
         attribute: CFStringRef,
@@ -102,7 +131,45 @@ unsafe extern "C" {
         data: CFDataRef,
         flags: u32,
     ) -> OSStatus;
+    fn PasteboardSynchronize(pasteboard: PasteboardRef) -> u32;
+    fn PasteboardGetItemCount(pasteboard: PasteboardRef, count: *mut usize) -> OSStatus;
+    fn PasteboardGetItemIdentifier(
+        pasteboard: PasteboardRef,
+        index: isize,
+        item: *mut *const c_void,
+    ) -> OSStatus;
+    fn PasteboardCopyItemFlavors(
+        pasteboard: PasteboardRef,
+        item: *const c_void,
+        flavors: *mut CFArrayRef,
+    ) -> OSStatus;
+    fn PasteboardCopyItemFlavorData(
+        pasteboard: PasteboardRef,
+        item: *const c_void,
+        flavor: CFStringRef,
+        data: *mut CFDataRef,
+    ) -> OSStatus;
+
+    /// Seconds since the last input event of `event_type`.
+    ///
+    /// Declared here rather than taken from the `core-graphics` crate, which
+    /// does not bind it. Both parameters are passed as raw `u32` because
+    /// `kCGAnyInputEventType` (`0xFFFF_FFFF`) is not a member of the crate's
+    /// `CGEventType` enum.
+    fn CGEventSourceSecondsSinceLastEventType(state_id: u32, event_type: u32) -> f64;
 }
+
+/// `kCGAnyInputEventType`: any keyboard, mouse, or tablet event.
+const ANY_INPUT_EVENT_TYPE: u32 = 0xFFFF_FFFF;
+/// `kCGEventSourceStateCombinedSessionState`.
+const COMBINED_SESSION_STATE: u32 = 0;
+
+/// How long the user must have been idle before KakaoTalk is allowed to come
+/// forward. Long enough to sit between keystrokes of ordinary typing, short
+/// enough that a send does not feel stalled.
+const DEFAULT_IDLE_GAP: Duration = Duration::from_millis(700);
+/// How long to keep waiting for that gap before giving up on the send.
+const DEFAULT_FOCUS_WAIT: Duration = Duration::from_secs(15);
 
 /// Owns an AX reference and releases it on drop, so the many early returns below cannot leak.
 struct AxRef(AXUIElementRef);
@@ -168,6 +235,245 @@ fn role_of(el: AXUIElementRef) -> String {
     attr_string(el, ATTR_ROLE).unwrap_or_default()
 }
 
+/// Options controlling how much the send is allowed to disturb the user.
+#[derive(Debug, Clone, Copy)]
+pub struct FocusPolicy {
+    /// Required gap in user input before KakaoTalk may be activated.
+    pub idle_gap: Duration,
+    /// How long to wait for that gap before failing.
+    pub max_wait: Duration,
+}
+
+impl Default for FocusPolicy {
+    fn default() -> Self {
+        Self {
+            idle_gap: DEFAULT_IDLE_GAP,
+            max_wait: DEFAULT_FOCUS_WAIT,
+        }
+    }
+}
+
+impl FocusPolicy {
+    /// Take focus immediately, without waiting for the user to stop typing.
+    pub fn immediate() -> Self {
+        Self {
+            idle_gap: Duration::ZERO,
+            max_wait: Duration::ZERO,
+        }
+    }
+}
+
+/// Everything a send needs to know about how it may disturb the user.
+#[derive(Clone, Default)]
+pub struct SendContext {
+    pub policy: FocusPolicy,
+    /// Present when the caller set up a curtain, which is what makes taking the
+    /// screen safe: input is blocked for the moment KakaoTalk is forward, and
+    /// the block is visible so nobody types into it.
+    pub curtain: Option<Arc<CurtainControl>>,
+}
+
+impl SendContext {
+    pub fn new(policy: FocusPolicy) -> Self {
+        Self {
+            policy,
+            curtain: None,
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.curtain
+            .as_ref()
+            .is_some_and(|curtain| curtain.is_cancelled())
+    }
+}
+
+/// Holds the screen for as long as an activating step needs it.
+///
+/// Dropping it restores the user's application first and only then lifts the
+/// curtain, so the screen that reappears is already the one they left.
+struct ScreenHold {
+    _focus: FocusRestore,
+    curtain: Option<Arc<CurtainControl>>,
+}
+
+impl Drop for ScreenHold {
+    fn drop(&mut self) {
+        if let Some(curtain) = &self.curtain {
+            curtain.hide();
+        }
+    }
+}
+
+/// Wait for a quiet moment, raise the curtain, and bring KakaoTalk forward.
+///
+/// The hold is constructed *before* the raise is attempted so that a failed
+/// raise still takes the curtain down and gives focus back on the way out.
+fn take_screen(pid: i32, ctx: &SendContext, subtitle: &str) -> Result<ScreenHold, SendError> {
+    wait_for_user_idle(ctx.policy)?;
+    if ctx.cancelled() {
+        return Err(SendError::Cancelled);
+    }
+    if let Some(curtain) = &ctx.curtain {
+        curtain.show(subtitle);
+    }
+    let hold = ScreenHold {
+        _focus: FocusRestore::capture(pid),
+        curtain: ctx.curtain.clone(),
+    };
+    if !raise_and_confirm(pid) {
+        return Err(SendError::FocusLost);
+    }
+    Ok(hold)
+}
+
+fn seconds_since_user_input() -> f64 {
+    unsafe { CGEventSourceSecondsSinceLastEventType(COMBINED_SESSION_STATE, ANY_INPUT_EVENT_TYPE) }
+}
+
+/// Block until the user has been idle for `policy.idle_gap`.
+///
+/// Activating an app in the middle of someone's typing is what turns "the send
+/// stole focus for a moment" into "the send broke what I was doing", so the
+/// wait happens *before* anything is touched. Only usable before this process
+/// posts any event of its own: a synthesized event resets the same timer.
+fn wait_for_user_idle(policy: FocusPolicy) -> Result<(), SendError> {
+    if policy.idle_gap.is_zero() {
+        return Ok(());
+    }
+    let deadline = Instant::now() + policy.max_wait;
+    loop {
+        let idle = Duration::from_secs_f64(seconds_since_user_input().max(0.0));
+        if idle >= policy.idle_gap {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(SendError::UserBusy {
+                waited: policy.max_wait.as_secs_f32(),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+}
+
+/// Whether `pid`'s application is the active one.
+///
+/// Read straight off the application element, which is the authoritative answer
+/// and the one the safety checks below depend on.
+///
+/// The obvious route — `AXFocusedApplication` on the system-wide element — is
+/// not usable here: from a plain CLI process it returns `kAXErrorCannotComplete`
+/// (-25204) every time, measured, even with accessibility permission granted.
+/// Per-application queries are unaffected.
+fn app_is_frontmost(pid: i32) -> bool {
+    let app = AxRef(unsafe { AXUIElementCreateApplication(pid) });
+    let Some(raw) = copy_attr(app.as_raw(), ATTR_FRONTMOST) else {
+        return false;
+    };
+    // copy_attr hands back a +1 reference; wrap_under_create_rule takes it.
+    let value = unsafe { CFBoolean::wrap_under_create_rule(raw as CFBooleanRef) };
+    value == CFBoolean::true_value()
+}
+
+/// The application that currently owns the screen, or `None` if it cannot be
+/// determined.
+///
+/// Used only to remember who to give focus back to. The on-screen window list is
+/// ordered front to back, so the first window at layer 0 — the normal window
+/// layer, above the desktop and below menus and overlays — belongs to the active
+/// application. This needs no Screen Recording permission: window owner and
+/// layer are readable without it, unlike window titles.
+fn frontmost_pid() -> Option<i32> {
+    let list = copy_window_info(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID,
+    )?;
+    for i in 0..list.len() {
+        let dict = *list.get(i)? as CFDictionaryRef;
+        if dict_i64(dict, "kCGWindowLayer") != Some(0) {
+            continue;
+        }
+        if let Some(pid) = dict_i64(dict, "kCGWindowOwnerPID") {
+            return i32::try_from(pid).ok();
+        }
+    }
+    None
+}
+
+fn dict_i64(dict: CFDictionaryRef, key: &str) -> Option<i64> {
+    let key = CFString::new(key);
+    let mut value: *const c_void = std::ptr::null();
+    let found = unsafe { CFDictionaryGetValueIfPresent(dict, key.as_CFTypeRef(), &mut value) };
+    if found == 0 || value.is_null() {
+        return None;
+    }
+    unsafe { CFNumber::wrap_under_get_rule(value as CFNumberRef) }.to_i64()
+}
+
+fn activate(pid: i32) {
+    let app = AxRef(unsafe { AXUIElementCreateApplication(pid) });
+    let key = CFString::new(ATTR_FRONTMOST);
+    let yes = core_foundation::boolean::CFBoolean::true_value();
+    unsafe {
+        AXUIElementSetAttributeValue(app.as_raw(), key.as_concrete_TypeRef(), yes.as_CFTypeRef())
+    };
+}
+
+/// Restores whichever application was frontmost before KakaoTalk was raised.
+///
+/// Taking focus is unavoidable for a paste; keeping it is not. This runs on
+/// every exit path, including the error ones, so a failed send does not leave
+/// the user staring at KakaoTalk.
+struct FocusRestore {
+    previous: Option<i32>,
+}
+
+impl FocusRestore {
+    /// Remember the current frontmost app, unless it is already `target_pid`,
+    /// in which case there is nothing to restore.
+    fn capture(target_pid: i32) -> Self {
+        Self {
+            previous: frontmost_pid().filter(|pid| *pid != target_pid),
+        }
+    }
+}
+
+impl Drop for FocusRestore {
+    fn drop(&mut self) {
+        if let Some(pid) = self.previous {
+            activate(pid);
+        }
+    }
+}
+
+/// Bring `pid` forward and confirm it actually got there.
+///
+/// Returns `false` when the app never became frontmost, which the caller must
+/// treat as "do not post a global key" rather than pressing on.
+fn raise_and_confirm(pid: i32) -> bool {
+    activate(pid);
+    for _ in 0..25 {
+        if app_is_frontmost(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    false
+}
+
+/// Post a global key only while `pid` is confirmed frontmost.
+///
+/// The confirmation is re-read immediately before the post, so the window in
+/// which the user could steal focus and receive the keystroke shrinks to the
+/// syscall in between. Without this, a Cmd+V meant for KakaoTalk lands in
+/// whatever the user clicked on.
+fn press_key_global_at(pid: i32, key: u16, flags: CGEventFlags) -> Result<(), SendError> {
+    if !app_is_frontmost(pid) {
+        return Err(SendError::FocusLost);
+    }
+    press_key_global(key, flags)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
     #[error(
@@ -213,6 +519,25 @@ pub enum SendError {
     ClipboardFailed(OSStatus),
     #[error("pasted the image but KakaoTalk never showed the send confirmation, and the paste did not clear")]
     ImageNotSent,
+    #[error(
+        "you kept using the keyboard or mouse for {waited:.0}s, and this send needs to bring \
+         KakaoTalk forward. Nothing was sent and nothing was typed anywhere. Retry when idle, \
+         or pass --take-focus-now to interrupt yourself."
+    )]
+    UserBusy { waited: f32 },
+    #[error(
+        "KakaoTalk was not frontmost at the moment the keystroke would have been sent, so it was \
+         not sent at all — posting it would have typed into whatever app you switched to. \
+         Nothing was sent; retry."
+    )]
+    FocusLost,
+    #[error("cancelled before anything was sent")]
+    Cancelled,
+    #[error(
+        "cancelled after the image was already pasted into KakaoTalk, so it may or may not have \
+         been delivered. Check the chat before resending."
+    )]
+    CancelledAfterPaste,
 }
 
 /// Uniform Type Identifier for the clipboard flavor, chosen from the file extension.
@@ -232,6 +557,126 @@ fn image_uti(path: &Path) -> Option<&'static str> {
     })
 }
 
+fn open_clipboard() -> Result<(PasteboardRef, AxRef), SendError> {
+    let mut pasteboard: PasteboardRef = std::ptr::null_mut();
+    let clipboard_name = CFString::new(PASTEBOARD_CLIPBOARD);
+    let status = unsafe { PasteboardCreate(clipboard_name.as_concrete_TypeRef(), &mut pasteboard) };
+    if status != OS_NO_ERR || pasteboard.is_null() {
+        return Err(SendError::ClipboardFailed(status));
+    }
+    unsafe { PasteboardSynchronize(pasteboard) };
+    // AxRef only cares that this is a CFType to release, which a PasteboardRef is.
+    Ok((pasteboard, AxRef(pasteboard)))
+}
+
+/// One item's flavors, captured so the user's clipboard survives the send.
+struct SavedItem {
+    flavors: Vec<(CFString, CFData)>,
+}
+
+/// Snapshot of the clipboard, restored on drop.
+///
+/// Sending an image has to go through the clipboard because KakaoTalk exposes
+/// no AX affordance for attaching a file. Clearing it would otherwise throw
+/// away whatever the user had copied, which is its own small act of vandalism.
+struct ClipboardRestore {
+    items: Vec<SavedItem>,
+    /// Flavors that could not be read back, e.g. promised data whose owner
+    /// answers lazily. Reported rather than passed over in silence.
+    unreadable: usize,
+}
+
+impl ClipboardRestore {
+    fn capture() -> Result<Self, SendError> {
+        let (pasteboard, _guard) = open_clipboard()?;
+        let mut count: usize = 0;
+        let status = unsafe { PasteboardGetItemCount(pasteboard, &mut count) };
+        if status != OS_NO_ERR {
+            return Err(SendError::ClipboardFailed(status));
+        }
+
+        let mut items = Vec::new();
+        let mut unreadable = 0usize;
+        for index in 1..=count {
+            let mut item_id: *const c_void = std::ptr::null();
+            if unsafe { PasteboardGetItemIdentifier(pasteboard, index as isize, &mut item_id) }
+                != OS_NO_ERR
+            {
+                unreadable += 1;
+                continue;
+            }
+            let mut flavor_array: CFArrayRef = std::ptr::null();
+            if unsafe { PasteboardCopyItemFlavors(pasteboard, item_id, &mut flavor_array) }
+                != OS_NO_ERR
+                || flavor_array.is_null()
+            {
+                unreadable += 1;
+                continue;
+            }
+            let flavor_count = unsafe { CFArrayGetCount(flavor_array) };
+            let mut flavors = Vec::new();
+            for i in 0..flavor_count {
+                let raw = unsafe { CFArrayGetValueAtIndex(flavor_array, i) } as CFStringRef;
+                if raw.is_null() {
+                    continue;
+                }
+                let flavor = unsafe { CFString::wrap_under_get_rule(raw) };
+                let mut data: CFDataRef = std::ptr::null();
+                let status = unsafe {
+                    PasteboardCopyItemFlavorData(
+                        pasteboard,
+                        item_id,
+                        flavor.as_concrete_TypeRef(),
+                        &mut data,
+                    )
+                };
+                if status != OS_NO_ERR || data.is_null() {
+                    unreadable += 1;
+                    continue;
+                }
+                flavors.push((flavor, unsafe { CFData::wrap_under_create_rule(data) }));
+            }
+            unsafe { CFRelease(flavor_array as CFTypeRef) };
+            if !flavors.is_empty() {
+                items.push(SavedItem { flavors });
+            }
+        }
+        Ok(Self { items, unreadable })
+    }
+
+    /// Flavors that were on the clipboard but could not be read back, and so
+    /// will not survive the restore.
+    fn unreadable_flavors(&self) -> usize {
+        self.unreadable
+    }
+}
+
+impl Drop for ClipboardRestore {
+    fn drop(&mut self) {
+        let Ok((pasteboard, _guard)) = open_clipboard() else {
+            return;
+        };
+        if unsafe { PasteboardClear(pasteboard) } != OS_NO_ERR {
+            return;
+        }
+        for (index, item) in self.items.iter().enumerate() {
+            // Any distinct non-null id per item; only uniqueness matters.
+            let item_id = (index + 1) as *const c_void;
+            for (flavor, data) in &item.flavors {
+                unsafe {
+                    PasteboardPutItemFlavor(
+                        pasteboard,
+                        item_id,
+                        flavor.as_concrete_TypeRef(),
+                        data.as_concrete_TypeRef(),
+                        0,
+                    )
+                };
+            }
+        }
+    }
+}
+
 fn put_image_on_clipboard(path: &Path) -> Result<(), SendError> {
     if !path.is_file() {
         return Err(SendError::ImageMissing(path.display().to_string()));
@@ -249,13 +694,7 @@ fn put_image_on_clipboard(path: &Path) -> Result<(), SendError> {
         source,
     })?;
 
-    let mut pasteboard: PasteboardRef = std::ptr::null_mut();
-    let clipboard_name = CFString::new(PASTEBOARD_CLIPBOARD);
-    let status = unsafe { PasteboardCreate(clipboard_name.as_concrete_TypeRef(), &mut pasteboard) };
-    if status != OS_NO_ERR || pasteboard.is_null() {
-        return Err(SendError::ClipboardFailed(status));
-    }
-    let _guard = AxRef(pasteboard);
+    let (pasteboard, _guard) = open_clipboard()?;
 
     let status = unsafe { PasteboardClear(pasteboard) };
     if status != OS_NO_ERR {
@@ -289,6 +728,9 @@ fn press_key_global(key: u16, flags: CGEventFlags) -> Result<(), SendError> {
         let event = CGEvent::new_keyboard_event(source.clone(), key, key_down)
             .map_err(|_| SendError::KeyEventFailed)?;
         event.set_flags(flags);
+        // Tagged so a raised curtain lets our own keystroke through while it
+        // swallows the user's.
+        tag_synthetic(&event);
         event.post(CGEventTapLocation::HID);
     }
     Ok(())
@@ -301,6 +743,7 @@ fn press_key(pid: i32, key: u16, flags: CGEventFlags) -> Result<(), SendError> {
         let event = CGEvent::new_keyboard_event(source.clone(), key, key_down)
             .map_err(|_| SendError::KeyEventFailed)?;
         event.set_flags(flags);
+        tag_synthetic(&event);
         event.post_to_pid(pid);
     }
     Ok(())
@@ -344,41 +787,60 @@ fn find_confirm_button(sheet: AXUIElementRef) -> Option<AxRef> {
     walk(sheet, 6)
 }
 
-/// Send the image at `image_path` into the chat window titled `room`, without activating
-/// KakaoTalk. Same window precondition as [`send_to_open_window`].
+/// Send the image at `image_path` into the chat window titled `room`.
 ///
 /// KakaoTalk has no AX affordance for attaching a file, so the image goes through the
 /// clipboard and a paste, which is what its UI is built to accept. Depending on version and
 /// state it either shows a confirmation sheet (click through it) or sends straight away.
+///
+/// Unlike text, this cannot run in the background: Cmd+V is a menu key equivalent, and an
+/// inactive app has no key window for `paste:` to reach, so posting it to the pid alone is
+/// silently dropped (measured). KakaoTalk therefore comes forward — but only during a gap in
+/// the user's own input, only after its frontmost state is confirmed, and with both the
+/// previous app and the clipboard put back afterwards.
 pub fn send_image_to_open_window(
     room: &str,
     image_path: &Path,
     allow_open: bool,
+    ctx: &SendContext,
 ) -> Result<(), SendError> {
     if !unsafe { AXIsProcessTrusted() } {
         return Err(SendError::AccessibilityDenied);
     }
+    // Validate the file before disturbing anything: a missing path or an
+    // unsupported type must fail without having taken focus or overwritten the
+    // clipboard.
+    if !image_path.is_file() {
+        return Err(SendError::ImageMissing(image_path.display().to_string()));
+    }
+    if image_uti(image_path).is_none() {
+        return Err(SendError::ImageTypeUnsupported(
+            image_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("(none)")
+                .to_string(),
+        ));
+    }
     let pid = kakaotalk_pid().ok_or(SendError::NotRunning)?;
     let app = AxRef(unsafe { AXUIElementCreateApplication(pid) });
-    let window = resolve_window(&app, room, allow_open)?;
+    let window = resolve_window(&app, room, allow_open, ctx)?;
 
+    let clipboard = ClipboardRestore::capture()?;
+    if clipboard.unreadable_flavors() > 0 {
+        eprintln!(
+            "katok: {} clipboard flavor(s) could not be read and will not be restored",
+            clipboard.unreadable_flavors()
+        );
+    }
     put_image_on_clipboard(image_path)?;
     let before = transcript_row_count(window.as_raw());
 
-    // Unlike text, an image cannot be delivered in the background. Cmd+V is a menu key
-    // equivalent, which the app only handles while it is frontmost — posting it to the pid
-    // alone is silently ignored (measured: the paste never lands). So bring KakaoTalk forward.
-    // AXFrontmost avoids depending on AppKit just to activate.
-    let front_key = CFString::new(ATTR_FRONTMOST);
-    let yes = core_foundation::boolean::CFBoolean::true_value();
-    unsafe {
-        AXUIElementSetAttributeValue(
-            app.as_raw(),
-            front_key.as_concrete_TypeRef(),
-            yes.as_CFTypeRef(),
-        )
-    };
-    std::thread::sleep(std::time::Duration::from_millis(250));
+    let _hold = take_screen(
+        pid,
+        ctx,
+        &format!("{room} · {}", attachment_label(image_path)),
+    )?;
 
     if let Some(compose) = compose_box(window.as_raw()) {
         let focus_key = CFString::new(ATTR_FOCUSED);
@@ -392,16 +854,27 @@ pub fn send_image_to_open_window(
         };
     }
 
-    // KakaoTalk is frontmost now, so the global tap is the reliable route for the paste.
-    press_key_global(KEY_V, CGEventFlags::CGEventFlagCommand)?;
+    if ctx.cancelled() {
+        return Err(SendError::Cancelled);
+    }
+    // KakaoTalk is confirmed frontmost, so the global tap is the reliable route for the paste
+    // — and the confirmation is re-read inside this call, immediately before the post.
+    press_key_global_at(pid, KEY_V, CGEventFlags::CGEventFlagCommand)?;
 
     // Depending on version KakaoTalk either shows a confirmation sheet or sends straight away,
     // so both are handled — but success is only ever claimed once a new transcript row exists.
     for _ in 0..40 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(100));
+        if ctx.cancelled() {
+            // The paste already went in, so this cannot promise nothing was
+            // delivered — say so rather than implying a clean abort.
+            return Err(SendError::CancelledAfterPaste);
+        }
 
         if let Some(sheet) = find_descendant(window.as_raw(), ROLE_SHEET, 4) {
             if let Some(button) = find_confirm_button(sheet.as_raw()) {
+                // An AX action is delivered to the element directly, so unlike a
+                // keystroke it stays correct even if the user has clicked away.
                 let action = CFString::new(ACTION_PRESS);
                 unsafe { AXUIElementPerformAction(button.as_raw(), action.as_concrete_TypeRef()) };
             }
@@ -575,6 +1048,7 @@ fn open_room_from_chat_list(
     windows: &[AxRef],
     room: &str,
     max_rows: usize,
+    pid: i32,
 ) -> Result<(), SendError> {
     let table = chat_list_table(windows).ok_or(SendError::ChatListUnavailable)?;
     let rows = child_elements(table.as_raw(), ATTR_ROWS);
@@ -595,7 +1069,7 @@ fn open_room_from_chat_list(
             scanned,
         })?;
 
-    open_row_by_click(app, windows, target.as_raw(), room)
+    open_row_by_click(app, windows, target.as_raw(), room, pid)
 }
 
 /// Screen frame of an element, or `None` when it exposes no geometry.
@@ -632,30 +1106,33 @@ fn frame_of(el: AXUIElementRef) -> Option<CGRect> {
 /// Rows advertise only `AXShowDefaultUI`/`AXShowAlternateUI` — they ignore `AXPress` and they
 /// ignore Enter even when selected and focused with the app frontmost (both measured). A real
 /// double-click is the only thing KakaoTalk acts on, which means the row has to be visible on
-/// screen and the app has to be frontmost, so this necessarily takes focus for a moment. The
-/// pointer is put back where it was afterwards.
+/// screen and the app has to be frontmost, so this necessarily takes focus for a moment.
+///
+/// It refuses to click unless KakaoTalk is confirmed frontmost — a click posted otherwise would
+/// land in whatever *is* frontmost — and puts the pointer back where it was. Taking focus and
+/// giving it back is the caller's job ([`resolve_window`]), which holds it across every attempt
+/// rather than snatching it back between them.
 fn open_row_by_click(
-    app: &AxRef,
+    _app: &AxRef,
     windows: &[AxRef],
     row: AXUIElementRef,
     room: &str,
+    pid: i32,
 ) -> Result<(), SendError> {
-    let front = CFString::new(ATTR_FRONTMOST);
-    let yes = core_foundation::boolean::CFBoolean::true_value();
-    unsafe {
-        AXUIElementSetAttributeValue(
-            app.as_raw(),
-            front.as_concrete_TypeRef(),
-            yes.as_CFTypeRef(),
-        )
-    };
     // A click lands on whatever window is on top at those coordinates, so the list has to be
     // raised above any chat windows before aiming at it.
     if let Some(main) = main_window(windows) {
         let raise = CFString::new(ACTION_RAISE);
         unsafe { AXUIElementPerformAction(main.as_raw(), raise.as_concrete_TypeRef()) };
     }
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Re-confirm after the raise settled: the click is about to be posted to
+    // screen coordinates, and if the user grabbed focus back it would land in
+    // their window instead of the chat list.
+    if frontmost_pid() != Some(pid) {
+        return Err(SendError::FocusLost);
+    }
 
     // Read geometry after raising: the row can move as the window comes forward.
     let rect = frame_of(row).ok_or_else(|| SendError::RoomOpenFailed(room.to_string()))?;
@@ -676,6 +1153,7 @@ fn open_row_by_click(
             let ev = CGEvent::new_mouse_event(source.clone(), kind, target, CGMouseButton::Left)
                 .map_err(|_| SendError::KeyEventFailed)?;
             ev.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click);
+            tag_synthetic(&ev);
             ev.post(CGEventTapLocation::HID);
         }
         std::thread::sleep(std::time::Duration::from_millis(40));
@@ -685,6 +1163,7 @@ fn open_row_by_click(
         if let Ok(ev) =
             CGEvent::new_mouse_event(source, CGEventType::MouseMoved, p, CGMouseButton::Left)
         {
+            tag_synthetic(&ev);
             ev.post(CGEventTapLocation::HID);
         }
     }
@@ -725,7 +1204,12 @@ fn search_field(window: AXUIElementRef) -> Option<AxRef> {
 ///
 /// Needed because AX only materialises the rows KakaoTalk has actually rendered — a room far
 /// down the list is invisible to a plain row scan, so searching is the only way to reach it.
-fn open_room_via_search(app: &AxRef, windows: &[AxRef], room: &str) -> Result<(), SendError> {
+fn open_room_via_search(
+    app: &AxRef,
+    windows: &[AxRef],
+    room: &str,
+    pid: i32,
+) -> Result<(), SendError> {
     let main = main_window(windows).ok_or(SendError::ChatListUnavailable)?;
     let field = search_field(main.as_raw()).ok_or(SendError::SearchUnavailable)?;
 
@@ -763,10 +1247,10 @@ fn open_room_via_search(app: &AxRef, windows: &[AxRef], room: &str) -> Result<()
             .iter()
             .find(|r| row_room_name(r.as_raw()).as_deref() == Some(room))
         {
-            return open_row_by_click(app, windows, hit.as_raw(), room);
+            return open_row_by_click(app, windows, hit.as_raw(), room, pid);
         }
         if rows.len() == 1 {
-            return open_row_by_click(app, windows, rows[0].as_raw(), room);
+            return open_row_by_click(app, windows, rows[0].as_raw(), room, pid);
         }
     }
     Err(SendError::RoomNotFound(room.to_string()))
@@ -819,7 +1303,12 @@ fn clear_search(windows: &[AxRef]) {
 }
 
 /// Find the chat window for `room`, opening it from the chat list when it is not already up.
-fn resolve_window(app: &AxRef, room: &str, allow_open: bool) -> Result<AxRef, SendError> {
+fn resolve_window(
+    app: &AxRef,
+    room: &str,
+    allow_open: bool,
+    ctx: &SendContext,
+) -> Result<AxRef, SendError> {
     let find = || {
         let windows = child_elements(app.as_raw(), ATTR_WINDOWS);
         let hit = windows
@@ -839,34 +1328,37 @@ fn resolve_window(app: &AxRef, room: &str, allow_open: bool) -> Result<AxRef, Se
         });
     }
 
-    // Two strategies, tried in order and both reported on failure — never silently.
-    // The row scan is far cheaper but only sees rows KakaoTalk has rendered, so search is the
-    // route to anything further down the list.
-    // Ordered cheapest-first. Opening a row means selecting it and pressing Enter, and Enter
-    // reaches whichever window KakaoTalk considers key — with a chat already open that is not
-    // the list, so the first two attempts only work when the list happens to be key. The last
-    // attempt therefore activates KakaoTalk, which does take focus but is a one-off per room;
-    // sending afterwards stays in the background.
+    // Two strategies, tried cheapest-first and both reported on failure — never silently.
+    // The row scan only sees rows KakaoTalk has already rendered, so search is the route to
+    // anything further down the list, and a full scan is the last resort.
+    //
+    // Taking focus is a one-off per room: once the window is open, sending into it stays in
+    // the background.
     const RECENT_ROWS: usize = 60;
     let mut last: Option<SendError> = None;
 
-    for attempt in 0..4 {
-        if attempt == 3 {
-            let key = CFString::new(ATTR_FRONTMOST);
-            let yes = core_foundation::boolean::CFBoolean::true_value();
-            unsafe {
-                AXUIElementSetAttributeValue(
-                    app.as_raw(),
-                    key.as_concrete_TypeRef(),
-                    yes.as_CFTypeRef(),
-                )
-            };
-            std::thread::sleep(std::time::Duration::from_millis(250));
+    let mut pid: i32 = 0;
+    if unsafe { AXUIElementGetPid(app.as_raw(), &mut pid) } != AX_SUCCESS {
+        return Err(SendError::RoomOpenFailed(room.to_string()));
+    }
+
+    // Opening a room means clicking a list row, and a click only reaches KakaoTalk
+    // while it is frontmost. The screen is therefore taken once and held across
+    // every attempt, not grabbed and released per attempt, which both tripled
+    // the wall clock and yanked focus away while the window was still coming up.
+    let hold = take_screen(pid, ctx, &format!("{room} 채팅방 여는 중"))?;
+
+    for attempt in 0..3 {
+        // Checked per attempt so Esc stops the run at the next boundary instead
+        // of after every strategy has been tried.
+        if ctx.cancelled() {
+            drop(hold);
+            return Err(SendError::Cancelled);
         }
         let outcome = match attempt {
-            0 => open_room_from_chat_list(app, &windows, room, RECENT_ROWS),
-            1 => open_room_via_search(app, &windows, room),
-            _ => open_room_from_chat_list(app, &windows, room, usize::MAX),
+            0 => open_room_from_chat_list(app, &windows, room, RECENT_ROWS, pid),
+            1 => open_room_via_search(app, &windows, room, pid),
+            _ => open_room_from_chat_list(app, &windows, room, usize::MAX, pid),
         };
         match outcome {
             Ok(()) => match wait_for_window(&find, 20) {
@@ -885,6 +1377,9 @@ fn resolve_window(app: &AxRef, room: &str, allow_open: bool) -> Result<AxRef, Se
         }
     }
     clear_search(&windows);
+    // Explicit so the screen is handed back before the error surfaces, rather
+    // than at some later point in the caller's scope.
+    drop(hold);
     Err(last.unwrap_or_else(|| SendError::RoomOpenFailed(room.to_string())))
 }
 
@@ -924,13 +1419,18 @@ fn kakaotalk_pid() -> Option<i32> {
 /// The window must already be open. Returns `Ok(())` only after confirming the compose box
 /// drained, i.e. KakaoTalk actually accepted the Enter — a stale success would otherwise look
 /// identical to a silently dropped message.
-pub fn send_to_open_window(room: &str, text: &str, allow_open: bool) -> Result<(), SendError> {
+pub fn send_to_open_window(
+    room: &str,
+    text: &str,
+    allow_open: bool,
+    ctx: &SendContext,
+) -> Result<(), SendError> {
     if !unsafe { AXIsProcessTrusted() } {
         return Err(SendError::AccessibilityDenied);
     }
     let pid = kakaotalk_pid().ok_or(SendError::NotRunning)?;
     let app = AxRef(unsafe { AXUIElementCreateApplication(pid) });
-    let window = resolve_window(&app, room, allow_open)?;
+    let window = resolve_window(&app, room, allow_open, ctx)?;
 
     let compose = compose_box(window.as_raw())
         .ok_or_else(|| SendError::ComposeBoxNotFound(room.to_string()))?;
@@ -985,19 +1485,14 @@ pub fn send_to_open_window(room: &str, text: &str, allow_open: bool) -> Result<(
 
     // Enter posted to the pid is routed by KakaoTalk to its key window, and with several chats
     // open that is often not this one. Falling back costs the user's focus for a moment, which
-    // is worth it over leaving a message sitting unsent in the box.
-    let yes = core_foundation::boolean::CFBoolean::true_value();
-    let front = CFString::new(ATTR_FRONTMOST);
-    unsafe {
-        AXUIElementSetAttributeValue(
-            app.as_raw(),
-            front.as_concrete_TypeRef(),
-            yes.as_CFTypeRef(),
-        )
-    };
+    // is worth it over leaving a message sitting unsent in the box — but only during a gap in
+    // their input, and only if KakaoTalk verifiably comes forward. A global Enter fired while
+    // the user is back in their own app would submit whatever they were in the middle of.
+    let _hold = take_screen(pid, ctx, &format!("{room} 로 전송 중"))?;
     let raise = CFString::new(ACTION_RAISE);
     unsafe { AXUIElementPerformAction(window.as_raw(), raise.as_concrete_TypeRef()) };
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    std::thread::sleep(Duration::from_millis(200));
+    let yes = core_foundation::boolean::CFBoolean::true_value();
     unsafe {
         AXUIElementSetAttributeValue(
             compose.as_raw(),
@@ -1005,7 +1500,7 @@ pub fn send_to_open_window(room: &str, text: &str, allow_open: bool) -> Result<(
             yes.as_CFTypeRef(),
         )
     };
-    press_key_global(KEY_RETURN, CGEventFlags::CGEventFlagNull)?;
+    press_key_global_at(pid, KEY_RETURN, CGEventFlags::CGEventFlagNull)?;
     if accepted(30) {
         return Ok(());
     }
@@ -1013,13 +1508,17 @@ pub fn send_to_open_window(room: &str, text: &str, allow_open: bool) -> Result<(
 }
 
 /// Resolve (opening if needed) the chat window for `room` without sending anything.
-pub fn resolve_room_window(room: &str, allow_open: bool) -> Result<(), SendError> {
+pub fn resolve_room_window(
+    room: &str,
+    allow_open: bool,
+    ctx: &SendContext,
+) -> Result<(), SendError> {
     if !unsafe { AXIsProcessTrusted() } {
         return Err(SendError::AccessibilityDenied);
     }
     let pid = kakaotalk_pid().ok_or(SendError::NotRunning)?;
     let app = AxRef(unsafe { AXUIElementCreateApplication(pid) });
-    resolve_window(&app, room, allow_open).map(|_| ())
+    resolve_window(&app, room, allow_open, ctx).map(|_| ())
 }
 
 /// Room names from the chat list, newest first. Used to find the exact name to pass to `--room`.
