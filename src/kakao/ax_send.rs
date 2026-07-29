@@ -796,6 +796,52 @@ fn press_key(pid: i32, key: u16, flags: CGEventFlags) -> Result<(), SendError> {
     Ok(())
 }
 
+/// A room title reduced to its members, order-independent.
+///
+/// KakaoTalk titles a room with no name by listing its members, and it does not
+/// use the same order the archive does — the archive stores
+/// `"도현, 나윤"` for the room the chat list shows as `"나윤, 도현"`.
+/// So a name taken from a search result never matches the row it came from, and
+/// every unnamed group room is unreachable by `--room`.
+///
+/// Comparing the sorted member set fixes that without having to guess
+/// KakaoTalk's ordering rule. A room with a real name has no members to split
+/// and simply compares as itself, and one whose name happens to contain commas
+/// is split the same way on both sides, so it still matches.
+fn room_member_key(title: &str) -> Vec<String> {
+    let mut parts: Vec<String> = title
+        .split(',')
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect();
+    parts.sort();
+    parts
+}
+
+/// Whether `candidate` is the room `wanted` names, allowing for member order.
+fn room_matches(candidate: &str, wanted: &str) -> bool {
+    candidate == wanted || room_member_key(candidate) == room_member_key(wanted)
+}
+
+/// The most distinctive single member to type into the search box.
+///
+/// Searching for the whole comma-joined title finds nothing when the order
+/// differs, so the query is one member and the filtering is done on the results.
+fn search_query_for(room: &str) -> String {
+    // Longest wins, first on a tie: `room_member_key` sorts, so the same room
+    // always produces the same query and a failure is reproducible.
+    room_member_key(room)
+        .into_iter()
+        .reduce(|best, part| {
+            if part.chars().count() > best.chars().count() {
+                part
+            } else {
+                best
+            }
+        })
+        .unwrap_or_else(|| room.to_string())
+}
+
 /// Reject a room name carrying characters that cannot be in one.
 ///
 /// A control character or a zero-width mark in `--room` is almost always a
@@ -1189,7 +1235,7 @@ fn open_room_from_chat_list(
     let target = rows
         .iter()
         .take(scanned)
-        .find(|r| row_room_name(r.as_raw()).as_deref() == Some(room))
+        .find(|r| row_room_name(r.as_raw()).is_some_and(|name| room_matches(&name, room)))
         .ok_or(SendError::RoomNotInChatList {
             room: room.to_string(),
             scanned,
@@ -1263,7 +1309,7 @@ fn open_row_by_click(
     // opened another. Sending is protected downstream by the window-title check,
     // but opening the wrong person's chat is its own harm, so this fails and
     // lets the caller retry against a settled list.
-    if row_room_name(row).as_deref() != Some(room) {
+    if !row_room_name(row).is_some_and(|name| room_matches(&name, room)) {
         return Err(SendError::ChatListMoved {
             room: room.to_string(),
         });
@@ -1354,7 +1400,8 @@ fn open_room_via_search(
 
     // Verified rather than fire-and-forget: whatever ends up in this box is what
     // decides which conversation gets opened.
-    set_value_verified(field.as_raw(), room, "the chat search box")?;
+    let query = search_query_for(room);
+    set_value_verified(field.as_raw(), &query, "the chat search box")?;
 
     // Results replace the chat-list rows. Wait for a row that actually reads back
     // as the requested room.
@@ -1380,7 +1427,7 @@ fn open_room_via_search(
         }
         if let Some(hit) = rows
             .iter()
-            .find(|r| row_room_name(r.as_raw()).as_deref() == Some(room))
+            .find(|r| row_room_name(r.as_raw()).is_some_and(|name| room_matches(&name, room)))
         {
             return open_row_by_click(app, windows, hit.as_raw(), room, pid);
         }
@@ -1443,9 +1490,9 @@ fn resolve_window(
 ) -> Result<AxRef, SendError> {
     let find = || {
         let windows = child_elements(app.as_raw(), ATTR_WINDOWS);
-        let hit = windows
-            .iter()
-            .position(|w| attr_string(w.as_raw(), ATTR_TITLE).as_deref() == Some(room));
+        let hit = windows.iter().position(|w| {
+            attr_string(w.as_raw(), ATTR_TITLE).is_some_and(|title| room_matches(&title, room))
+        });
         (windows, hit)
     };
 
@@ -1693,4 +1740,51 @@ pub fn open_window_titles() -> Result<Vec<String>, SendError> {
         .filter_map(|w| attr_string(w.as_raw(), ATTR_TITLE))
         .filter(|t| !t.is_empty())
         .collect())
+}
+
+#[cfg(test)]
+mod room_matching_tests {
+    use super::{room_matches, room_member_key, search_query_for};
+
+    #[test]
+    fn member_order_does_not_decide_identity() {
+        // The archive stores one order, the chat list shows another. Measured on
+        // a real install: "도현, 나윤" against "나윤, 도현".
+        assert!(room_matches("나윤, 도현", "도현, 나윤"));
+        assert!(room_matches("도현, 나윤", "도현, 나윤"));
+    }
+
+    #[test]
+    fn different_members_are_still_different_rooms() {
+        assert!(!room_matches("나윤, 지우", "도현, 나윤"));
+        assert!(!room_matches("나윤", "도현, 나윤"));
+    }
+
+    #[test]
+    fn a_named_room_compares_as_itself() {
+        assert!(room_matches("주말 등산 모임", "주말 등산 모임"));
+        assert!(!room_matches("주말 등산 모임", "주말 등산"));
+        // A real name that happens to contain commas splits the same way on
+        // both sides, so it still matches itself and nothing else.
+        let name = "양자BlockQ(교육,보안,컴퓨팅)";
+        assert!(room_matches(name, name));
+        assert!(!room_matches("양자BlockQ(교육,보안)", name));
+    }
+
+    #[test]
+    fn whitespace_around_members_is_ignored() {
+        assert_eq!(
+            room_member_key("  나윤 ,도현  "),
+            vec!["나윤".to_string(), "도현".to_string()]
+        );
+        assert!(room_matches("나윤 , 도현", "도현,나윤"));
+    }
+
+    #[test]
+    fn the_search_query_is_one_distinctive_member() {
+        // Typing the joined title finds nothing when the order differs, so the
+        // query is a single member and the filtering happens on the results.
+        assert_eq!(search_query_for("나윤, 도현"), "나윤");
+        assert_eq!(search_query_for("주말 등산 모임"), "주말 등산 모임");
+    }
 }
