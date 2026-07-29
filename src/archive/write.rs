@@ -331,11 +331,19 @@ impl Archive {
              ON CONFLICT(account_hash, chat_id, message_id) DO UPDATE SET
                  chat_name = excluded.chat_name,
                  chat_type = excluded.chat_type,
+                 sender_id = excluded.sender_id,
                  sender_nickname = excluded.sender_nickname,
+                 timestamp = excluded.timestamp,
+                 text = excluded.text,
+                 message_type = excluded.message_type,
                  reply_to_message_id = excluded.reply_to_message_id
              WHERE messages.chat_name <> excluded.chat_name
                 OR messages.chat_type <> excluded.chat_type
+                OR messages.sender_id <> excluded.sender_id
                 OR messages.sender_nickname <> excluded.sender_nickname
+                OR messages.timestamp <> excluded.timestamp
+                OR messages.text <> excluded.text
+                OR messages.message_type <> excluded.message_type
                 OR messages.reply_to_message_id IS NOT excluded.reply_to_message_id",
             )
             .map_err(Error::Sql)?

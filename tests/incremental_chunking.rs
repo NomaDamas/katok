@@ -1916,3 +1916,60 @@ fn repeated_long_messages_do_not_collide_parent_ids() {
     let conn = Connection::open(dir.path().join("archive.sqlite3")).expect("open for asserts");
     assert_archive_invariants(&conn, messages.len() as i64);
 }
+
+/// An edited message must reach the archive, the chunk text, and the search
+/// index — not just its metadata.
+///
+/// The upsert used to update only `chat_name`, `chat_type`, `sender_nickname`
+/// and `reply_to_message_id`, so a corrected body stayed at its original
+/// wording forever and the chat was reported unchanged, which kept it out of
+/// `touched_chats` and out of the rebuild. `timestamp` and `message_type` are
+/// worse than cosmetic: both are chunk-boundary inputs, so a corrected time left
+/// boundaries derived from a value the archive no longer held.
+#[test]
+fn an_edited_message_updates_the_archive_and_its_chunk() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = Archive::open(&dir.path().join("archive.sqlite3")).expect("open archive");
+    let at = chrono::Utc::now();
+
+    let original = vec![raw("chat-edit", "m1", "Alice", at, "원래 문장", None)];
+    archive.sync_messages(&original).expect("first sync");
+    rebuild_chunks_with_settings(&archive, ChunkSettings::default()).expect("first rebuild");
+
+    let edited = vec![raw("chat-edit", "m1", "Alice", at, "고쳐진 문장", None)];
+    let report = archive.sync_messages(&edited).expect("second sync");
+    assert_eq!(
+        report.updated_messages, 1,
+        "an edited body must count as an update, or the chat never gets rebuilt"
+    );
+    assert!(
+        report
+            .touched_chats
+            .iter()
+            .any(|c| c.chat_id == "chat-edit"),
+        "the edited chat must be marked for rebuild"
+    );
+
+    rebuild_chunks_for_chats(&archive, ChunkSettings::default(), &report.touched_chats)
+        .expect("scoped rebuild");
+
+    let conn = Connection::open(dir.path().join("archive.sqlite3")).expect("open for asserts");
+    let stored: String = conn
+        .query_row(
+            "SELECT text FROM messages WHERE message_id = 'm1'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("stored text");
+    assert_eq!(stored, "고쳐진 문장");
+
+    let chunk_text: String = conn
+        .query_row("SELECT text FROM chunks LIMIT 1", [], |r| r.get(0))
+        .expect("chunk text");
+    assert!(
+        chunk_text.contains("고쳐진"),
+        "the chunk must carry the edited body, got {chunk_text}"
+    );
+
+    assert_archive_invariants(&conn, 1);
+}
