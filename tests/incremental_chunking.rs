@@ -2206,3 +2206,93 @@ fn reconciliation_deletes_inside_the_source_window_and_never_outside_it() {
         "the deleted message must go"
     );
 }
+
+/// A real deletion round-trip: the message goes from the archive, its chunk, and
+/// the search index, and the surrounding history does not.
+///
+/// The preview must be exact before anything is removed, and a second run must
+/// find nothing left to do. This is the only code in the crate that deletes, so
+/// it is checked against an actual removal rather than only against the
+/// zero-candidate case.
+#[test]
+fn a_deleted_message_leaves_the_archive_chunks_and_index() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = Archive::open(&dir.path().join("archive.sqlite3")).expect("open archive");
+    let at = chrono::Utc::now();
+
+    let full: Vec<RawMessage> = ["첫번째 문장", "지워질 문장", "세번째 문장"]
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            raw(
+                "chat-del",
+                &format!("m{i}"),
+                "Alice",
+                at + chrono::Duration::seconds(i as i64),
+                text,
+                None,
+            )
+        })
+        .collect();
+    archive.sync_messages(&full).expect("seed");
+    rebuild_chunks_with_settings(&archive, ChunkSettings::default()).expect("seed chunks");
+
+    let conn = Connection::open(dir.path().join("archive.sqlite3")).expect("open");
+    let chunk_has = |needle: &str| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE text LIKE '%' || ?1 || '%'",
+            [needle],
+            |r| r.get(0),
+        )
+        .expect("chunk scan")
+    };
+    let fts_has = |needle: &str| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH ?1",
+            [needle],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    };
+    assert_eq!(
+        chunk_has("지워질"),
+        1,
+        "the message must start out in a chunk"
+    );
+
+    // The source no longer reports m1, but still covers the span it sat in.
+    let source: Vec<RawMessage> = full
+        .iter()
+        .filter(|m| m.message_id != "m1")
+        .cloned()
+        .collect();
+
+    let preview = archive
+        .reconcile_deletions(&source, false)
+        .expect("preview");
+    assert_eq!(preview.len(), 1);
+    assert_eq!(preview[0].message_id, "m1");
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0))
+            .expect("count"),
+        3,
+        "a preview must not delete"
+    );
+
+    let removed = archive.reconcile_deletions(&source, true).expect("apply");
+    assert_eq!(removed.len(), 1);
+    rebuild_chunks_with_settings(&archive, ChunkSettings::default()).expect("rechunk");
+
+    assert_eq!(chunk_has("지워질"), 0, "the chunk text must lose it");
+    assert_eq!(fts_has("지워질"), 0, "the search index must lose it");
+    assert_eq!(chunk_has("첫번째"), 1, "the neighbours must survive");
+    assert_eq!(chunk_has("세번째"), 1, "the neighbours must survive");
+
+    // Idempotent: nothing left to reconcile.
+    assert!(archive
+        .reconcile_deletions(&source, false)
+        .expect("second preview")
+        .is_empty());
+
+    assert_archive_invariants(&conn, 2);
+}

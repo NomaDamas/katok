@@ -1644,7 +1644,14 @@ fn resolve_window(
     // the wall clock and yanked focus away while the window was still coming up.
     let hold = take_screen(pid, ctx, &format!("{} 채팅방 여는 중", target.name))?;
 
-    for attempt in 0..3 {
+    // Each strategy is tried more than once. Driving another app's list is
+    // inherently racy — it reorders under us, a row can be mid-render, the click
+    // can land as the window is still coming up — and every one of those is
+    // transient. Retrying is what turns "sometimes fails" into "works", and the
+    // identity checks below are what keep a retry from being a second chance to
+    // hit the wrong room.
+    const ATTEMPTS: usize = 6;
+    for attempt in 0..ATTEMPTS {
         // Checked per attempt so Esc stops the run at the next boundary instead
         // of after every strategy has been tried.
         if ctx.cancelled() {
@@ -1660,11 +1667,18 @@ fn resolve_window(
         // room opened another. Filtering the list down to the single matching
         // row removes the race rather than narrowing it, because there is
         // nothing left to reorder.
-        let outcome = match attempt {
+        let outcome = match attempt % 3 {
             0 => open_room_via_search(app, &windows, target, pid),
             1 => open_room_from_chat_list(app, &windows, target, RECENT_ROWS, pid),
             _ => open_room_from_chat_list(app, &windows, target, usize::MAX, pid),
         };
+        // Ambiguity is a property of the chat list, not of this attempt: trying
+        // again cannot make two rooms of one name distinguishable, and retrying
+        // would only be a second chance to pick wrong.
+        if let Err(SendError::AmbiguousRoom { .. }) = &outcome {
+            drop(hold);
+            return outcome.map(|()| unreachable!());
+        }
         match outcome {
             Ok(()) => match wait_for_window(&find, 20) {
                 Some(w) => {
@@ -1677,7 +1691,7 @@ fn resolve_window(
             },
             Err(e) => last = Some(e),
         }
-        if attempt == 0 {
+        if attempt % 3 == 0 {
             clear_search(&windows);
         }
     }
