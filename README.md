@@ -107,22 +107,37 @@ katok chunk parent <chunk-id> --json
 - `chunk context`는 같은 채팅방의 바로 앞뒤 chunk를 보여줍니다.
 - `chunk parent`는 semantic search가 사용한 더 큰 parent window를 보여줍니다.
 
-카카오톡 이미지 메시지의 로컬 캐시를 추출하려면 media 명령을 사용합니다.
+카카오톡 첨부를 추출하려면 media 명령을 사용합니다. 사진(type 2), 앨범(type 27), 영상(type 3), 그리고 일반 파일(type 18)을 다룹니다. 일반 파일은 하나의 메시지 타입이 zip·pdf·xlsx·hwp·pptx 등 모든 확장자를 덮으므로 형식별 대응이 따로 필요하지 않습니다.
 
 ```bash
 katok media get --chat <chat-id> --json
+katok media get --chat <chat-id> --kind file --json
 katok media get --chat <chat-id> --log <log-id> --out ./katok-media --no-cdn --json
 ```
 
-`media get`은 type 2 단일 사진과 type 27 앨범 프레임을 읽고, 각 프레임을 로컬 full `.img`, CDN presigned GET, 로컬 thumbnail `.thm`, stub 순서로 해석합니다. 이미지 추출 자체가 사용자가 `media get`을 실행해 opt in하는 기능이며, 이 명령에서 네트워크를 사용할 수 있는 유일한 동작은 attachment metadata의 CDN presigned GET입니다. CDN 응답은 `cs` SHA-1과 일치한 bytes만 저장하며, `--no-cdn`을 주면 CDN tier를 끄고 로컬 `.img`/`.thm`/stub만 사용합니다. 기본 출력 위치는 katok data directory 아래 `media/<chat-id>/`입니다.
+각 프레임은 로컬 full 캐시(`.img`/`.vid`), CDN presigned GET, 로컬 thumbnail `.thm`, stub 순서로 해석됩니다. 추출 자체가 사용자가 명령을 실행해 opt in하는 기능이며, 네트워크를 사용하는 유일한 동작은 attachment metadata의 CDN presigned GET입니다. CDN 응답은 `cs` SHA-1과 일치한 bytes만 저장하고, `--no-cdn`을 주면 CDN tier를 끄고 로컬 캐시만 사용합니다. 기본 출력 위치는 katok data directory 아래 `media/<chat-id>/`입니다.
+
+**일반 파일은 로컬 캐시가 없습니다.** 카카오톡은 사진·영상만 컨테이너에 캐시하고 파일 첨부는 디스크에 남기지 않으므로, 파일의 tier는 CDN 하나뿐이고 `--no-cdn`으로는 아무것도 받을 수 없습니다. 저장 파일명은 첨부의 원본 이름을 그대로 씁니다(`<logId>_<원본이름>`) — zip 본문은 확장자 sniffing으로 `.bin`이 되므로 이름이 확장자의 권위입니다.
+
+**presigned 서명은 약 14일 뒤 만료되고, 만료되면 410으로 사라집니다.** 로컬 사본이 없는 파일 첨부에서는 이것이 곧 영구 유실을 뜻하므로, 정기적으로 `media backfill`을 돌려 창이 닫히기 전에 보존하는 것이 이 기능의 실제 사용법입니다.
+
+```bash
+katok media backfill --dry-run --json
+katok media backfill --json
+katok media backfill --kind file --kind video --json
+```
+
+`backfill`은 미디어가 있는 모든 방을 돌면서 아직 만료되지 않은 링크만 받습니다. 이미 저장된 프레임은 네트워크 호출 없이 건너뛰므로 재실행이 멱등하고, 중단된 실행을 그대로 이어받습니다. 기본 kind는 `file`입니다(사진·영상은 로컬 캐시가 있지만 파일은 없기 때문). `--dry-run`은 요청을 한 번도 보내지 않고 각 프레임이 어느 tier로 갈지만 보고하므로, 받을 대상과 만료된 대상을 미리 구분할 수 있습니다.
 
 `--json` 출력 스키마의 주요 필드는 다음과 같습니다.
 
-- `chat_id`, `log_id`, `limit`, `output_dir`, `cdn_enabled`
-- `frame_count`: 읽은 이미지 frame 수
-- `records[]`: `logId`, `idx`, `w`, `h`, `cs`, `tier`, `tier_reason`, `path`, `sha1`, `sender`, `ts`
+- `chat_id`, `log_id`, `limit`, `kinds`, `output_dir`, `cdn_enabled`
+- `frame_count`: 읽은 frame 수
+- `records[]`: `logId`, `idx`, `kind`, `name`, `w`, `h`, `cs`, `s`, `tier`, `tier_reason`, `path`, `sha1`, `sender`, `ts`
 - `errors[]`: tier 실패 관측값, `logId`, `idx`, `stage`, `path`, `error`
-- `tier_counts`: `full`, `cdn`, `thumb`, `stub` 별 개수
+- `tier_counts`: `full`, `cdn`, `thumb`, `stub`, `existing`, `planned` 별 개수
+
+`tier_reason`은 왜 그 tier로 떨어졌는지 말합니다. `cdn-expired`는 서명 만료, `cdn-too-large`는 선언 크기가 `--max-bytes`를 넘어 요청 전에 거절, `cdn-unverifiable`은 `cs` 지문이 없어 검증할 수 없어 거절, `unavailable`은 로컬 캐시가 애초에 존재하지 않는 파일 첨부를 뜻합니다.
 
 ## 검색 방식
 

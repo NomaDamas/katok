@@ -40,8 +40,11 @@ katok chunks --chat <chat-id> --json      # every chunk in one room (metadata on
 katok transcript --chat <chat-id> --json                      # exports one room to Markdown
 katok transcript --chat <chat-id> --since 2026-07-20 --json   # only messages at or after a time
 katok transcript --chat <chat-id> --out <dir> --json          # writes outside the data dir
-katok media get --chat <chat-id> --out <dir> --json   # extracts image and video attachments
+katok media get --chat <chat-id> --out <dir> --json   # photos, albums, videos, and files
+katok media get --chat <chat-id> --kind file --json   # only file attachments (zip, pdf, xlsx, ...)
 katok media get --chat <chat-id> --out <dir> --no-cdn --json   # local tiers only
+katok media backfill --dry-run --json   # what is still fetchable across every room
+katok media backfill --json             # save it before the presigned links expire
 ```
 
 For synthetic QA only:
@@ -89,13 +92,33 @@ Sync is cheap enough to run often: on a 400k-message archive a quiet sync takes 
 
 `katok media get --chat <chat-id> --out <dir>` resolves each media message through four tiers in order: the decrypted local cache, a GET of the attachment's own presigned CDN URL verified by SHA-1, the decrypted `.thm` thumbnail, and finally a metadata stub. That CDN GET is the only network access anywhere in the CLI, and `--no-cdn` disables it so resolution stays entirely local.
 
-Photos (type 2), albums (type 27), and videos (type 3) are all covered. Photos and albums read the `.img` cache; videos read the `.vid` cache, whose filename stem uses a `v` key prefix instead of `p`. The output extension is sniffed from the decoded body, so a video lands as `.mp4`.
+Photos (type 2), albums (type 27), videos (type 3), and generic file attachments (type 18) are all covered; `--kind photo|video|file` narrows a run and defaults to every kind. Photos and albums read the `.img` cache; videos read the `.vid` cache, whose filename stem uses a `v` key prefix instead of `p`. For those, the output extension is sniffed from the decoded body, so a video lands as `.mp4`.
+
+**A file attachment is one message type covering every extension** — zip, pdf, xlsx, hwp, pptx, csv, mp3 and the rest — so nothing needs adding per format.
+
+Two things make files behave unlike photos:
+
+- **They have no local cache at all.** KakaoTalk writes only `.thm`, `.img`, and `.vid` into the container; a file attachment never touches disk. The CDN is its only tier, `--no-cdn` returns nothing for it, and a stub for a file says `unavailable` rather than `not-cached` because there was never a cache that could have held it.
+- **The attachment `name` is authoritative for the extension**, not the body. A zip sniffs as `.bin`, so output is written as `<logId>_<original name>` with the name sanitised so it cannot escape the output directory.
 
 Three practical notes for video:
 
 - The local `.vid` cache only holds videos that were actually played on this Mac. Anything else must come from the CDN tier, so `--no-cdn` will miss it.
 - The presigned CDN URL carries an `expires` epoch. Past that, the video is unrecoverable from the archive and only the sender can re-send it.
 - KakaoTalk re-encodes video on send. The retrieved file is the compressed copy the room received, not the sender's original.
+
+## Preserving Attachments Before They Expire
+
+A presigned URL lasts roughly 14 days. For a video that means falling back to whatever is cached; for a file, which has no cache, expiry is permanent loss. `katok media backfill` exists for that window:
+
+```
+katok media backfill --dry-run --json    # what would be fetched, no requests at all
+katok media backfill --json              # every room, live links only, kind=file by default
+```
+
+It walks every room holding media, skips anything already saved without a network call — so re-running is idempotent and resumes an interrupted run — and reports per-tier totals. `--dry-run` distinguishes `planned` (would fetch) from `stub`/`cdn-expired` (already gone), which switching the CDN tier off cannot do.
+
+Run it on a schedule if attachments matter. A backfill started after the window has closed cannot recover anything: report the expired count honestly rather than implying the files can be retrieved.
 
 ## Related Skills
 
