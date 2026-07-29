@@ -86,6 +86,21 @@ spaces get dropped, laughter (`ㅋㅋ` vs `ㅎㅎ`), vowel stretching (`너어�
 and typical length — a 140-character paragraph in a room whose average is ten
 reads as someone else typing.
 
+**Check who else already saw it.** Rooms overlap, and a person in two of them
+has read both. Reporting to someone what was just said in a room they are also
+in reads as talking past them — and if they know an assistant is writing, it
+reads as the assistant not knowing who it is talking to. Before referring to
+something said elsewhere, look up whether the recipient was in that room:
+
+```sql
+-- is this person a member of the room that message went to?
+SELECT DISTINCT sender_nickname FROM messages WHERE chat_id = ?;
+```
+
+Measured: a thank-you sent to a room containing a parent-in-law **and** a
+partner, followed by a message to that same partner one-to-one saying the
+parent-in-law had been thanked. She had been in the first room the whole time.
+
 Reuse their own phrases where one fits. Rewriting `a habitual misspelling` as `감사합니다`
 is a correction nobody asked for and it is what makes a message sound generated.
 
