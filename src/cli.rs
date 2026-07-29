@@ -123,6 +123,15 @@ pub(crate) enum Commands {
         /// must never touch the screen: opening a room briefly moves KakaoTalk's own windows.
         #[arg(long)]
         no_open: bool,
+        /// Take focus immediately instead of waiting for a gap in your typing.
+        ///
+        /// Only steps that cannot run in the background wait at all — sending an image, and
+        /// opening a closed room. Use this when nobody is at the keyboard.
+        #[arg(long)]
+        take_focus_now: bool,
+        /// Seconds to wait for that gap before giving up and sending nothing.
+        #[arg(long, default_value_t = 15, conflicts_with = "take_focus_now")]
+        focus_wait: u64,
         #[arg(long)]
         json: bool,
     },

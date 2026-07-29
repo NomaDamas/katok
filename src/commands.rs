@@ -92,6 +92,8 @@ pub(crate) fn run(
             limit,
             dry_run,
             no_open,
+            take_focus_now,
+            focus_wait,
             json,
         } => run_send(
             &room,
@@ -102,6 +104,8 @@ pub(crate) fn run(
             limit,
             dry_run,
             no_open,
+            take_focus_now,
+            focus_wait,
             json,
         ),
     }
@@ -118,6 +122,8 @@ fn run_send(
     limit: usize,
     dry_run: bool,
     no_open: bool,
+    take_focus_now: bool,
+    focus_wait: u64,
     json: bool,
 ) -> Result<()> {
     use katok::kakao::ax_send;
@@ -133,10 +139,20 @@ fn run_send(
     }
 
     let allow_open = !no_open;
+    // Anything that has to bring KakaoTalk forward waits for a gap in the user's
+    // own typing first, so a send never lands mid-keystroke.
+    let policy = if take_focus_now {
+        ax_send::FocusPolicy::immediate()
+    } else {
+        ax_send::FocusPolicy {
+            max_wait: std::time::Duration::from_secs(focus_wait),
+            ..ax_send::FocusPolicy::default()
+        }
+    };
 
     if dry_run {
         // Opening a room is harmless, so this proves targeting end-to-end without sending.
-        ax_send::resolve_room_window(room, allow_open)?;
+        ax_send::resolve_room_window(room, allow_open, policy)?;
         return print_payload(
             json,
             &serde_json::json!({ "resolved": true, "room": room, "sent": false }),
@@ -144,7 +160,7 @@ fn run_send(
     }
 
     if let Some(path) = image {
-        ax_send::send_image_to_open_window(room, &path, allow_open)?;
+        ax_send::send_image_to_open_window(room, &path, allow_open, policy)?;
         // Report the file name only; the path can leak directory structure into logs.
         let name = path
             .file_name()
@@ -171,7 +187,7 @@ fn run_send(
         anyhow::bail!("refusing to send an empty message");
     }
 
-    ax_send::send_to_open_window(room, body, allow_open)?;
+    ax_send::send_to_open_window(room, body, allow_open, policy)?;
     // Never echo the body: sent content is as sensitive as anything else this crate handles.
     print_payload(
         json,
