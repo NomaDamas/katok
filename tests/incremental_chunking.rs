@@ -1973,3 +1973,127 @@ fn an_edited_message_updates_the_archive_and_its_chunk() {
 
     assert_archive_invariants(&conn, 1);
 }
+
+/// One room ingested under two accounts must not crash the sync.
+///
+/// `messages` is keyed `(account_hash, chat_id, message_id)`, so the same room
+/// read under two accounts stores two rows sharing a `message_id`, and the read
+/// order places them adjacently. Before the chunker broke on the account
+/// boundary both landed in one chunk, whose `message_ids` then repeated that id
+/// and violated `chunk_messages`' primary key — taking the whole transaction
+/// down with it. The archive docs name this exact case as one the scope unit
+/// handles; the chunker did not.
+#[test]
+fn one_room_under_two_accounts_does_not_collide() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = Archive::open(&dir.path().join("archive.sqlite3")).expect("open archive");
+    let at = chrono::Utc::now();
+
+    let mut messages = Vec::new();
+    for account in ["acct", "other-acct"] {
+        for i in 0..3 {
+            let mut m = raw(
+                "shared-room",
+                &format!("m{i}"),
+                "Alice",
+                at + chrono::Duration::seconds(i),
+                "같은 방, 두 계정",
+                None,
+            );
+            m.account_hash = account.to_string();
+            messages.push(m);
+        }
+    }
+
+    archive.sync_messages(&messages).expect("sync");
+    rebuild_chunks_with_settings(&archive, ChunkSettings::default())
+        .expect("rebuild must not violate chunk_messages' primary key");
+
+    let conn = Connection::open(dir.path().join("archive.sqlite3")).expect("open for asserts");
+    // Each account's copy is chunked separately, so every stored row is placed
+    // exactly once.
+    assert_archive_invariants(&conn, messages.len() as i64);
+
+    let per_account: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT c.account_hash) FROM chunks c",
+            [],
+            |r| r.get(0),
+        )
+        .expect("distinct account_hash on chunks");
+    assert_eq!(per_account, 2, "each account must get its own chunks");
+}
+
+/// A scoped rebuild must leave the same refs a full rebuild would, including an
+/// edge that crosses chats.
+///
+/// The scoped delete drops a `chunk_parent_refs` row when **either** side sits
+/// in the rebuilt chat, but the re-insert used to match on the child alone. An
+/// edge whose parent lived in the rebuilt chat and whose child lived elsewhere
+/// was therefore deleted and never restored, and the matching `reply_edges` row
+/// kept a `parent_chunk_id` pointing at a chunk that no longer existed.
+///
+/// `message_id` is minted as `{chat_id}-{logId}` by the macOS reader, which
+/// makes cross-chat edges impossible there — but `kakaocli` and `fixture` take
+/// both ids verbatim from data this crate does not control, so the invariant
+/// does not hold at the boundary where it would have to.
+#[test]
+fn a_scoped_rebuild_restores_a_cross_chat_reply_ref() {
+    let at = chrono::Utc::now();
+    let messages = vec![
+        raw("chat-a", "a1", "Alice", at, "부모 메시지", None),
+        // Child lives in another chat but replies into chat-a.
+        raw(
+            "chat-b",
+            "b1",
+            "Bob",
+            at + chrono::Duration::seconds(5),
+            "다른 방에서 단 답장",
+            Some("a1"),
+        ),
+    ];
+
+    let full_dir = tempfile::tempdir().expect("tempdir");
+    let full = Archive::open(&full_dir.path().join("archive.sqlite3")).expect("open");
+    full.sync_messages(&messages).expect("sync");
+    rebuild_chunks_with_settings(&full, ChunkSettings::default()).expect("full rebuild");
+
+    let scoped_dir = tempfile::tempdir().expect("tempdir");
+    let scoped = Archive::open(&scoped_dir.path().join("archive.sqlite3")).expect("open");
+    let report = scoped.sync_messages(&messages).expect("sync");
+    rebuild_chunks_with_settings(&scoped, ChunkSettings::default()).expect("seed");
+    // Now rebuild only chat-a, the chat holding the PARENT of the edge.
+    let touched: Vec<_> = report
+        .touched_chats
+        .iter()
+        .filter(|c| c.chat_id == "chat-a")
+        .cloned()
+        .collect();
+    rebuild_chunks_for_chats(&scoped, ChunkSettings::default(), &touched).expect("scoped rebuild");
+
+    let refs = |dir: &tempfile::TempDir| -> Vec<(String, String)> {
+        let conn = Connection::open(dir.path().join("archive.sqlite3")).expect("open");
+        let mut stmt = conn
+            .prepare("SELECT child_chunk_id, parent_chunk_id FROM chunk_parent_refs ORDER BY 1, 2")
+            .expect("prepare");
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("query")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("collect");
+        rows
+    };
+
+    assert_eq!(
+        refs(&scoped_dir),
+        refs(&full_dir),
+        "a scoped rebuild must leave the same cross-chat refs as a full one"
+    );
+    assert!(
+        !refs(&full_dir).is_empty(),
+        "the fixture must produce a ref"
+    );
+
+    let conn = Connection::open(scoped_dir.path().join("archive.sqlite3")).expect("open");
+    assert_archive_invariants(&conn, messages.len() as i64);
+}

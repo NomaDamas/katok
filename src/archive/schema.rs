@@ -121,6 +121,15 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         -- insert — so the wider index is the single source of truth for reaching a chat's rows.
         CREATE INDEX IF NOT EXISTS idx_messages_chat_timestamp
             ON messages(chat_id, timestamp, message_id);
+        -- Partial on purpose: only ~1.6% of messages are replies, so indexing
+        -- just those keeps this a few thousand entries instead of one per row,
+        -- while still letting a scoped ref rebuild find the children of a chat's
+        -- messages without scanning `messages`.
+        CREATE INDEX IF NOT EXISTS idx_messages_reply_to
+            ON messages(reply_to_message_id)
+            WHERE reply_to_message_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_reply_edges_parent
+            ON reply_edges(parent_message_id);
         CREATE INDEX IF NOT EXISTS idx_chunk_messages_message
             ON chunk_messages(message_id);",
     )

@@ -74,6 +74,23 @@ pub const INSERT_REPLY_EDGES_FOR_CHAT: &str = "INSERT OR IGNORE INTO reply_edges
      WHERE reply_to_message_id IS NOT NULL
        AND chat_id = ?1";
 
+/// Re-insert the refs a scoped rebuild deleted, child side.
+///
+/// The delete removes a ref when **either** side sits in the rebuilt chat, so
+/// the re-insert has to cover both. Keyed on the child alone, an edge whose
+/// parent lived in this chat but whose child lived elsewhere was deleted and
+/// never restored, and its `reply_edges` row kept pointing at a chunk id that no
+/// longer existed.
+///
+/// The two sides are separate statements rather than one `OR`, because SQLite
+/// cannot drive an index from `(a.chat_id = ?1 OR b.chat_id = ?1)` and falls
+/// back to scanning `messages` — which is exactly the archive-size cost the
+/// scoped rebuild exists to avoid, and which the query-plan test catches.
+///
+/// Cross-chat edges cannot arise from the macOS reader, which mints
+/// `message_id` as `{chat_id}-{logId}`. They can from `kakaocli` and `fixture`,
+/// which take both ids verbatim from data this crate does not control — so the
+/// invariant the scoping was argued from is not enforced where it would matter.
 pub const INSERT_CHUNK_PARENT_REFS_FOR_CHAT: &str =
     "INSERT OR IGNORE INTO chunk_parent_refs(child_chunk_id, parent_chunk_id)
      SELECT child.chunk_id, parent.chunk_id
@@ -82,6 +99,18 @@ pub const INSERT_CHUNK_PARENT_REFS_FOR_CHAT: &str =
      JOIN chunk_messages parent ON parent.message_id = child_msg.reply_to_message_id
      WHERE child_msg.reply_to_message_id IS NOT NULL
        AND child_msg.chat_id = ?1
+       AND child.chunk_id != parent.chunk_id";
+
+/// Parent side of the same re-insert: edges pointing *into* this chat from a
+/// child that lives in another one. Reached through `idx_messages_reply_to`.
+pub const INSERT_CHUNK_PARENT_REFS_INTO_CHAT: &str =
+    "INSERT OR IGNORE INTO chunk_parent_refs(child_chunk_id, parent_chunk_id)
+     SELECT child.chunk_id, parent.chunk_id
+     FROM messages parent_msg
+     JOIN messages child_msg ON child_msg.reply_to_message_id = parent_msg.message_id
+     JOIN chunk_messages child ON child.message_id = child_msg.message_id
+     JOIN chunk_messages parent ON parent.message_id = parent_msg.message_id
+     WHERE parent_msg.chat_id = ?1
        AND child.chunk_id != parent.chunk_id";
 
 pub const RESOLVE_REPLY_EDGES_FOR_CHAT: &str = "UPDATE reply_edges
@@ -105,11 +134,15 @@ pub const RESOLVE_REPLY_EDGES_FOR_CHAT: &str = "UPDATE reply_edges
         WHERE chat_id = ?1 AND reply_to_message_id IS NOT NULL
      )";
 
-/// The four statements of a per-chat ref rebuild, in order, for query-plan tests.
-pub const SCOPED_REF_REBUILD_STATEMENTS: [&str; 4] = [
+/// The statements of a per-chat ref rebuild, in order, for query-plan tests.
+///
+/// Both ref-insert directions are here: the delete drops a ref when either side
+/// is in this chat, so only re-inserting the child side left the other half gone.
+pub const SCOPED_REF_REBUILD_STATEMENTS: [&str; 5] = [
     DELETE_REPLY_EDGES_FOR_CHAT,
     INSERT_REPLY_EDGES_FOR_CHAT,
     INSERT_CHUNK_PARENT_REFS_FOR_CHAT,
+    INSERT_CHUNK_PARENT_REFS_INTO_CHAT,
     RESOLVE_REPLY_EDGES_FOR_CHAT,
 ];
 

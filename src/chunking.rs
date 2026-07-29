@@ -114,7 +114,22 @@ fn should_start_new_chunk(
     let Some(previous) = previous else {
         return Ok(false);
     };
-    if previous.chat_id != next.chat_id || previous.sender_nickname != next.sender_nickname {
+    // `account_hash` first. The same room read under two accounts stores two
+    // rows per message sharing one `message_id`, and the read order puts them
+    // side by side. Without this check they land in one chunk, whose
+    // `message_ids` then holds that id twice and violates the
+    // `chunk_messages(chunk_id, message_id)` primary key — which, since a sync
+    // is one transaction, rolls the whole sync back.
+    //
+    // Ordering deliberately stays `(chat_id, timestamp, message_id)`: putting
+    // `account_hash` in the sort key would group each account's run together but
+    // cost `idx_messages_chat_timestamp`, and with it the tail-scoped read that
+    // keeps an incremental sync off the full table. Two accounts therefore chunk
+    // more finely than one would, which is correct output, not wrong output.
+    if previous.account_hash != next.account_hash
+        || previous.chat_id != next.chat_id
+        || previous.sender_nickname != next.sender_nickname
+    {
         return Ok(true);
     }
     if previous.message_type != "text" || next.message_type != "text" {
