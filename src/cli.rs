@@ -192,21 +192,58 @@ pub(crate) enum SourceCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum MediaCommand {
+    /// Extract media from one room: photos, albums, videos, and file attachments.
     Get {
-        /// KakaoTalk chatId to read image messages from.
+        /// KakaoTalk chatId to read media messages from.
         #[arg(long)]
         chat: i64,
-        /// Optional KakaoTalk logId to extract one image message.
+        /// Optional KakaoTalk logId to extract one media message.
         #[arg(long)]
         log: Option<i64>,
-        /// Output directory for decrypted/fetched image files.
+        /// Output directory for decrypted/fetched media files.
         #[arg(long)]
         out: Option<PathBuf>,
         /// Disable CDN downloads and use only local cache/thumbnail/stub tiers.
+        /// File attachments have no local tier, so they resolve to nothing here.
         #[arg(long)]
         no_cdn: bool,
-        /// Maximum number of image messages to read from the room.
+        /// Media kinds to extract; repeatable. Defaults to every kind.
+        #[arg(long = "kind", value_name = "KIND")]
+        kinds: Vec<String>,
+        /// Maximum number of media messages to read from the room.
         #[arg(long, default_value_t = 5000, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=100_000))]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Save every attachment whose CDN link is still valid, across all rooms.
+    ///
+    /// KakaoTalk presigns an attachment URL for roughly 14 days and keeps no
+    /// local copy of file attachments, so anything not fetched inside that
+    /// window is gone for good. Run this on a schedule to keep the window from
+    /// closing on files you have not opened.
+    ///
+    /// Re-running is free: a frame whose output already exists is skipped
+    /// without a network call.
+    Backfill {
+        /// Limit to one room instead of every room that holds media.
+        #[arg(long)]
+        chat: Option<i64>,
+        /// Root output directory; each room gets a `<chatId>` subdirectory.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Media kinds to preserve; repeatable. Defaults to `file`, the only
+        /// kind with no local cache to fall back on.
+        #[arg(long = "kind", value_name = "KIND")]
+        kinds: Vec<String>,
+        /// Report what would be fetched without downloading anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Refuse to download an attachment larger than this many bytes.
+        #[arg(long, default_value_t = 512 * 1024 * 1024)]
+        max_bytes: u64,
+        /// Maximum number of media messages to read per room.
+        #[arg(long, default_value_t = 100_000, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=1_000_000))]
         limit: usize,
         #[arg(long)]
         json: bool,
