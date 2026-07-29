@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-07-29
+
+### Sending
+
+- `katok send --chat <chat-id>` addresses a room by id. Display names are not identifiers — on the reference install four names are shared by two rooms each and one archive name covers nine — so a name alone had no single answer and the first matching row won. An ambiguous name is now refused outright rather than guessed at, since a message delivered to the wrong person cannot be taken back; `--chat` resolves it through the room's position among same-named chats.
+- Rooms are matched by member set rather than by string. KakaoTalk titles an unnamed group room by listing its members and does not use the order the archive does (`나윤, 도현` against `도현, 나윤`), so a name taken from a search result never matched the row it came from and every unnamed group room was unreachable.
+- The chat search box is now typed into with real keystrokes. Setting its accessibility value painted the text but told the app nothing had happened, so the list never filtered and the search strategy silently did nothing — leaving the unfiltered list, where a room far enough down sits outside the scroll area and was clicked at coordinates nobody could see.
+- `--draft` leaves a message in the compose box for review. It pastes rather than writing the accessibility value, because writing that value *is* sending: KakaoTalk delivers on the change with no keystroke involved.
+- A send that needs the screen now runs behind a full-screen curtain that blocks keyboard and mouse input, so it cannot collide with whoever is using the machine. Blocked input is dropped rather than queued, which is why the block is always visible. Esc or the cancel button stops the run.
+- The previously active application and the clipboard are restored on every exit path, including failures, and a global keystroke is never posted unless KakaoTalk is confirmed frontmost at that instant — a collision now produces a clean failure instead of a paste into someone else's document.
+- `--room` rejects control characters and invisible formatting marks, naming the codepoint, since those are quoting accidents upstream rather than missing rooms.
+
+### Reading
+
+- `katok media get` extracts generic file attachments (message type 18) alongside photos, albums and videos — one message type covering zip, pdf, xlsx, hwp and every other extension. `--kind photo|video|file` narrows a run.
+- File attachments resolve through the CDN alone: KakaoTalk keeps no local copy of them, so `--no-cdn` returns nothing for a file and a stub reads `unavailable` rather than `not-cached`. Output keeps the attachment's original name, sanitised so it cannot escape the output directory, disguise its own extension through a bidi override, or differ in bytes from a visually identical name.
+- Added `katok media backfill`, which saves every attachment whose presigned link is still valid across all rooms. Presigned URLs expire after roughly two weeks and a file has no local copy, so anything not fetched inside that window is lost. Re-running is free: an already-saved frame is skipped with no network call.
+- Fixed a limit that silently failed every CDN body over 10 MB — most videos and many files — by passing the fetch cap explicitly rather than relying on the HTTP client default.
 
 ### Fixes to behaviour inherited from upstream
 
@@ -10,6 +27,7 @@
 - An edited message now reaches the archive, its chunk, and the index. The upsert updated only `chat_name`, `chat_type`, `sender_nickname` and `reply_to_message_id`, so a corrected body kept its original wording forever and the chat was reported unchanged, keeping it out of the rebuild. `timestamp` and `message_type` are worse than cosmetic: both feed chunk boundary computation.
 - One room ingested under two accounts no longer crashes the sync. The chunk boundary test compared chat and sender but not `account_hash`, so both accounts' copies of a message landed in one chunk and violated `chunk_messages`' primary key.
 - Parent windows no longer over-report `message_count`. A chunk spilling across three windows was counted by all three.
+- An open chat is named by its link rather than by listing its members. `NTChatRoom.chatName` is NULL for these, so they were filed under a member list that appears nowhere in KakaoTalk — mislabelling the largest room in the reference archive, 185,066 messages, and making three rooms unreachable by name. Re-syncing corrected 263,436 rows.
 - Added `katok sync --prune-preview` and `--prune-deleted`. Sync otherwise only upserts, so a message deleted upstream stayed in the archive, its chunk text and the embedded index indefinitely. Only the time range the source still covers is reconciled: KakaoTalk prunes its own database and outliving that is what this archive is for, so anything older than the source's reach is left alone, and a chat the source did not mention is skipped entirely. Preview reports without deleting; deletion is never the default.
 
 - `katok media get` now extracts videos (message type 3) alongside photos and albums. Video bodies live in the `.vid` cache under a `v`-prefixed key stem, and the output extension is sniffed so ISO-BMFF bodies land as `.mp4` instead of `.bin`.
