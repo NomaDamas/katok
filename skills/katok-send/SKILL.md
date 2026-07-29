@@ -24,8 +24,7 @@ When the window is closed, katok finds the room in the chat list and opens it. T
 
 - `--room` accepts either the name the chat list shows or the one the archive
   stores. A room with no name is titled by listing its members, and the two
-  sources order that list differently (`나윤, 도현` against
-  `도현, 나윤`), so matching is by member set rather than by string.
+  sources order that list differently (`나윤, 도현` against `도현, 나윤`), so matching is by member set rather than by string.
 - The self-chat window is titled with your own nickname, not "나와의 채팅".
 - `--no-open` fails with exit 1 instead of opening a closed window. Use it for automation that must never disturb the screen.
 - `--dry-run` resolves and opens the room but sends nothing. Use it to verify targeting.
@@ -72,11 +71,14 @@ ORDER BY timestamp DESC LIMIT 25;
 **Voice is per-room, not per-person, and the difference is large.** Measured on
 one account on one evening, the same person describing the same meal:
 
-| Room | What they actually write |
+| Room | Register observed |
 |---|---|
-| with a parent-in-law present | `오늘 불고기 된찌 a polite casual ending!` · `우왕 a habitual misspelling!` |
-| one-to-one with a partner | `a spaceless one-liner` · `a plain-speech remark` (avg 10 chars, spaces often dropped) |
-| work group | `a full-sentence status report with @mentions` |
+| family group, an elder present | polite `~여` endings, playful misspellings, thanks spelled the writer's own way |
+| one-to-one with a partner | plain speech, spaces dropped, ~10 characters a message |
+| work group | full polite endings, @mentions, complete sentences reporting a fact |
+
+(Registers only. Do not paste real messages into documentation — these came
+from a live archive and the examples above are deliberately paraphrased.)
 
 So a single stored "persona" would be wrong in two rooms out of three. Sample the
 target room at composition time instead.
@@ -101,8 +103,9 @@ Measured: a thank-you sent to a room containing a parent-in-law **and** a
 partner, followed by a message to that same partner one-to-one saying the
 parent-in-law had been thanked. She had been in the first room the whole time.
 
-Reuse their own phrases where one fits. Rewriting `a habitual misspelling` as `감사합니다`
-is a correction nobody asked for and it is what makes a message sound generated.
+Reuse their own phrasing where it fits, misspellings included. "Correcting" a
+habitual typo into its textbook form is a change nobody asked for, and it is
+exactly what makes a message read as generated.
 
 ## Reporting success
 

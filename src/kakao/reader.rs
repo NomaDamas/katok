@@ -46,8 +46,8 @@ struct RoomMeta {
     /// `NTChatRoom.chatName` is NULL for these, so without it the room falls
     /// through to a reconstructed member list and ends up stored under a name
     /// that appears nowhere in KakaoTalk. On the reference install that
-    /// mislabelled the largest room in the archive — 185,066 messages filed
-    /// under `제이, a member, …` instead of `주말 등산`.
+    /// mislabelled the largest room in the archive: 185,066 messages filed
+    /// under a list of members instead of the name the room actually has.
     open_link_name: Option<String>,
 }
 
