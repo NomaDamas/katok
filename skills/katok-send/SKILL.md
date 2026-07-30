@@ -68,20 +68,11 @@ WHERE chat_id = ? AND sender_id = ? AND message_type = 'text'
 ORDER BY timestamp DESC LIMIT 25;
 ```
 
-**Voice is per-room, not per-person, and the difference is large.** Measured on
-one account on one evening, the same person describing the same meal:
-
-| Room | Register observed |
-|---|---|
-| family group, an elder present | polite `~여` endings, playful misspellings, thanks spelled the writer's own way |
-| one-to-one with a partner | plain speech, spaces dropped, ~10 characters a message |
-| work group | full polite endings, @mentions, complete sentences reporting a fact |
-
-(Registers only. Do not paste real messages into documentation — these came
-from a live archive and the examples above are deliberately paraphrased.)
-
-So a single stored "persona" would be wrong in two rooms out of three. Sample the
-target room at composition time instead.
+**Voice is per-room, not per-person, and the difference is large.** One writer's
+endings, spacing, message length, and how they spell a greeting can all differ
+between a family room, a one-to-one, and a work group — far enough apart that a
+single stored "persona" would be wrong in most rooms it was applied to. Sample
+the target room at composition time instead of keeping a profile.
 
 What to take from the sample: sentence endings (`~여` / `~다` / formal), whether
 spaces get dropped, laughter (`ㅋㅋ` vs `ㅎㅎ`), vowel stretching (`너어어무`),
@@ -99,9 +90,9 @@ something said elsewhere, look up whether the recipient was in that room:
 SELECT DISTINCT sender_nickname FROM messages WHERE chat_id = ?;
 ```
 
-Measured: a thank-you sent to a room containing a parent-in-law **and** a
-partner, followed by a message to that same partner one-to-one saying the
-parent-in-law had been thanked. She had been in the first room the whole time.
+The failure mode is narrating an event to someone who was present for it. Run
+the membership check before writing any sentence that reports what happened
+somewhere else.
 
 Reuse their own phrasing where it fits, misspellings included. "Correcting" a
 habitual typo into its textbook form is a change nobody asked for, and it is

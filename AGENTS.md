@@ -20,6 +20,14 @@ Kakao Memory is a local-first semantic memory and search layer for KakaoTalk con
 - Use fixtures with synthetic chat data only.
 - Do not create tests that depend on the user's real KakaoTalk installation or real local DB.
 - Real KakaoTalk smoke tests may be manual-only and must avoid printing private content.
+- **Nothing derived from a real archive may be committed, including in documentation.** This
+  repository is public; the archive it reads is not. Avoiding private content in session output
+  is not enough, because a finding made while looking at live data tends to get written down
+  next to the rule it justified — a quoted message, a room name, a person's name or kinship
+  term, a sample used because it was at hand. Skill files, comments, tests, and changelogs are
+  all published. State the rule and drop the evidence: the observation that convinced you is
+  for this conversation, not for the commit. Fixtures stay synthetic even when a real value
+  would have been easier to paste.
 - Keep README, CLI help, and privacy behavior aligned in the same change.
 
 ## Manual Verification Against a Real Install

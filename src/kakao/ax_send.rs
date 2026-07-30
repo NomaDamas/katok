@@ -1966,8 +1966,9 @@ mod room_matching_tests {
 
     #[test]
     fn member_order_does_not_decide_identity() {
-        // The archive stores one order, the chat list shows another. Measured on
-        // a real install: "도현, 나윤" against "나윤, 도현".
+        // The archive stores one member order, the chat list shows another, so a
+        // name comparison decides identity by member set rather than by string.
+        // The names here are stand-ins; only the reordering is what was observed.
         assert!(room_matches("나윤, 도현", "도현, 나윤"));
         assert!(room_matches("도현, 나윤", "도현, 나윤"));
     }
