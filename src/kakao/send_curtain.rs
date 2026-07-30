@@ -30,8 +30,6 @@
 //! AppKit demands the main thread, so [`run_with_curtain`] keeps the UI and the
 //! tap on the main run loop and moves the caller's work to a worker thread.
 
-#![cfg(target_os = "macos")]
-
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

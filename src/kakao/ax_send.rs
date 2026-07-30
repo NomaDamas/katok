@@ -43,8 +43,6 @@
 //! - **Put everything back.** The previously frontmost app is reactivated and the clipboard is
 //!   restored, on every exit path including failures.
 
-#![cfg(target_os = "macos")]
-
 use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
 use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
 use core_foundation::boolean::{CFBoolean, CFBooleanRef};
