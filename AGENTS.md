@@ -29,6 +29,13 @@ Kakao Memory is a local-first semantic memory and search layer for KakaoTalk con
   for this conversation, not for the commit. Fixtures stay synthetic even when a real value
   would have been easier to paste.
 - Keep README, CLI help, and privacy behavior aligned in the same change.
+- **Verify against the toolchain CI pins, and run every gate CI runs.** `.github/workflows/ci.yml`
+  pins the Rust version (matching `rust-version` in `Cargo.toml`) and runs five gates: `cargo fmt
+  --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all-targets`,
+  `cargo publish --dry-run`, and `scripts/verify_release_config.py`. A newer local toolchain
+  passes work that CI rejects, because clippy retires and re-scopes lints between releases — so
+  `cargo +<pinned> clippy` is the check that counts. Running a subset and reporting it as green
+  is the failure mode this exists to prevent.
 
 ## Manual Verification Against a Real Install
 
