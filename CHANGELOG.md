@@ -11,13 +11,26 @@
 - A send that needs the screen now runs behind a full-screen curtain that blocks keyboard and mouse input, so it cannot collide with whoever is using the machine. Blocked input is dropped rather than queued, which is why the block is always visible. Esc or the cancel button stops the run.
 - The previously active application and the clipboard are restored on every exit path, including failures, and a global keystroke is never posted unless KakaoTalk is confirmed frontmost at that instant — a collision now produces a clean failure instead of a paste into someone else's document.
 - `--room` rejects control characters and invisible formatting marks, naming the codepoint, since those are quoting accidents upstream rather than missing rooms.
+- `katok send` waits for a gap in the user's typing before taking focus, restores the previously active application when it is done, and no longer overwrites the clipboard: the existing contents are saved and put back. Added `--take-focus-now` to skip the wait and `--focus-wait` to bound it.
+- Resolving a room takes focus once for the whole attempt sequence rather than per attempt, which cut a failing resolve from 54s to under 3s.
 
 ### Reading
 
+- `katok media get` now extracts videos (message type 3) alongside photos and albums. Video bodies live in the `.vid` cache under a `v`-prefixed key stem, and the output extension is sniffed so ISO-BMFF bodies land as `.mp4` instead of `.bin`.
+- Video resolution reuses the existing tier order unchanged, so an uncached video still comes from the SHA-1 verified presigned CDN URL and `--no-cdn` still keeps a run local-only.
 - `katok media get` extracts generic file attachments (message type 18) alongside photos, albums and videos — one message type covering zip, pdf, xlsx, hwp and every other extension. `--kind photo|video|file` narrows a run.
 - File attachments resolve through the CDN alone: KakaoTalk keeps no local copy of them, so `--no-cdn` returns nothing for a file and a stub reads `unavailable` rather than `not-cached`. Output keeps the attachment's original name, sanitised so it cannot escape the output directory, disguise its own extension through a bidi override, or differ in bytes from a visually identical name.
 - Added `katok media backfill`, which saves every attachment whose presigned link is still valid across all rooms. Presigned URLs expire after roughly two weeks and a file has no local copy, so anything not fetched inside that window is lost. Re-running is free: an already-saved frame is skipped with no network call.
 - Fixed a limit that silently failed every CDN body over 10 MB — most videos and many files — by passing the fetch cap explicitly rather than relying on the HTTP client default.
+
+### Sync performance
+
+- A sync commits as one transaction and reuses prepared statements on the per-row write path, instead of a transaction per row.
+- Only chats whose messages actually changed are re-chunked. `sync` reports `touched_chats`, and `--touched` exposes the list in the JSON payload.
+- A touched chat rebuilds only its tail rather than its whole history. Re-chunking used to re-read every message in the room, so a single new message in the largest room cost about 4.95s — the price tracked room size rather than the number of new messages. The rebuild now starts at the last chunk window preceding the earliest change, which is about 25x faster on that room. A mid-history edit still widens the scope to whatever the change actually reaches, up to a full rebuild when it lands at the chat head; correctness is not traded for speed.
+- The reply and parent-reference pass is scoped to touched chats. Both endpoints of every `reply_edges` and `chunk_parent_refs` row are provably inside one chat, because message ids are chat-prefixed, so the whole-archive scan was never necessary. The remaining cost no longer tracks archive size.
+- The messages tail is sought by `(chat_id, timestamp)` and the FTS tail delete by rowid, rather than scanning. Added indexes on the chunk tables by `(chat_id, started_at)`.
+- A gap-settings change or a `CHUNKER_VERSION` bump still forces a full rebuild.
 
 ### Fixes to behaviour inherited from upstream
 
@@ -30,17 +43,6 @@
 - An open chat is named by its link rather than by listing its members. `NTChatRoom.chatName` is NULL for these, so they were filed under a member list that appears nowhere in KakaoTalk — mislabelling the largest room in the reference archive, 185,066 messages, and making three rooms unreachable by name. Re-syncing corrected 263,436 rows.
 - Added `katok sync --prune-preview` and `--prune-deleted`. Sync otherwise only upserts, so a message deleted upstream stayed in the archive, its chunk text and the embedded index indefinitely. Only the time range the source still covers is reconciled: KakaoTalk prunes its own database and outliving that is what this archive is for, so anything older than the source's reach is left alone, and a chat the source did not mention is skipped entirely. Preview reports without deleting; deletion is never the default.
 
-- `katok media get` now extracts videos (message type 3) alongside photos and albums. Video bodies live in the `.vid` cache under a `v`-prefixed key stem, and the output extension is sniffed so ISO-BMFF bodies land as `.mp4` instead of `.bin`.
-- Video resolution reuses the existing tier order unchanged, so an uncached video still comes from the SHA-1 verified presigned CDN URL and `--no-cdn` still keeps a run local-only.
-- `katok media get` also extracts generic file attachments (message type 18), which is one message type covering zip, pdf, xlsx, hwp, pptx and every other extension. `--kind photo|video|file` narrows a run; the default reads every kind.
-- File attachments resolve through the CDN alone. KakaoTalk keeps no local copy of them — a full scan of the container finds only `.thm`, `.img`, and `.vid` — so `--no-cdn` returns nothing for a file and a stub reads `unavailable` rather than `not-cached`.
-- File output keeps the attachment's original name (`<logId>_<name>`), sanitised so it cannot escape the output directory. The name is authoritative for the extension because a zip body sniffs as `.bin`.
-- Added `katok media backfill`, which saves every attachment whose presigned link is still valid across all rooms. Presigned URLs expire after roughly 14 days and a file has no local copy, so anything not fetched inside that window is lost for good. Re-running is free and idempotent: an already-saved frame is skipped with no network call. `--dry-run` reports what would be fetched without issuing a request, separating "would download" from "already expired".
-- Fixed a latent limit that silently failed every CDN body over 10 MB, which is most videos and many files, by passing the fetch cap explicitly instead of relying on the HTTP client default. An attachment whose declared size exceeds `--max-bytes` is now refused before the request rather than after the download.
-- `katok send` no longer risks pasting into whatever application the user switched to. Sending an image, or opening a closed room, has to bring KakaoTalk forward, and a global keystroke goes to whichever app is frontmost at that instant. Frontmost is now confirmed immediately before every global post and the post is abandoned otherwise, so a collision produces a clean failure instead of a stray paste.
-- `katok send` blocks keyboard and mouse input behind a visible full-screen curtain for the second or two a send needs the screen, so the user cannot collide with it at all. Esc or the cancel button stops the run. Blocked input is dropped rather than queued, which is exactly why the block is always shown rather than silent.
-- `katok send` waits for a gap in the user's typing before taking focus, restores the previously active application when it is done, and no longer overwrites the clipboard: the existing contents are saved and put back. Added `--take-focus-now` to skip the wait and `--focus-wait` to bound it.
-- Resolving a room takes focus once for the whole attempt sequence rather than per attempt, which cut a failing resolve from 54s to under 3s.
 
 ## 0.1.3 - 2026-07-18
 
