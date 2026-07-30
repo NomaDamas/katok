@@ -467,7 +467,11 @@ fn cli_sync_json_exposes_touched_chats_only_with_flag() {
         .get("touched_chats")
         .and_then(|v| v.as_array())
         .expect("touched_chats array present when --touched is set");
-    assert_eq!(touched.len(), 1, "replies fixture has one chat: {touched:?}");
+    assert_eq!(
+        touched.len(),
+        1,
+        "replies fixture has one chat: {touched:?}"
+    );
     let entry = &touched[0];
     assert_eq!(entry["chat_id"], "chat-group-1");
     assert_eq!(entry["earliest_changed_message_id"], "m1");

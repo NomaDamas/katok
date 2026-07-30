@@ -77,9 +77,8 @@ fn main() -> anyhow::Result<()> {
     for i in 1..=runs {
         let started = Instant::now();
         // Match sync path: rebuild_chunks runs inside one archive transaction.
-        let total_chunks = archive.in_transaction(|| {
-            rebuild_chunks_for_chats(&archive, settings, &touched)
-        })?;
+        let total_chunks =
+            archive.in_transaction(|| rebuild_chunks_for_chats(&archive, settings, &touched))?;
         let ms = started.elapsed().as_millis();
         times_ms.push(ms);
         println!(

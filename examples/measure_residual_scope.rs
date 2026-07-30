@@ -23,9 +23,10 @@ use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
     let mut args = env::args().skip(1);
-    let work_dir = PathBuf::from(args.next().expect(
-        "usage: measure_residual_scope <work_dir> <source_archive.sqlite3> <chat_id>",
-    ));
+    let work_dir = PathBuf::from(
+        args.next()
+            .expect("usage: measure_residual_scope <work_dir> <source_archive.sqlite3> <chat_id>"),
+    );
     let source = PathBuf::from(args.next().expect("need source archive path"));
     let chat_id = args.next().expect("need chat_id");
     let runs: u32 = env::var("MEASURE_RUNS")
@@ -128,9 +129,8 @@ fn main() -> anyhow::Result<()> {
         let scoped = Archive::open(&scoped_eq_path)?;
         let touched = one_new_message_touch(scoped.connection(), &chat_id)?;
         let t = Instant::now();
-        let scoped_count = scoped.in_transaction(|| {
-            rebuild_chunks_for_chats(&scoped, settings, &[touched])
-        })?;
+        let scoped_count =
+            scoped.in_transaction(|| rebuild_chunks_for_chats(&scoped, settings, &[touched]))?;
         println!(
             "equality scoped_rebuild ms={} archive_chunks={}",
             t.elapsed().as_millis(),
@@ -290,7 +290,8 @@ fn measure_point(
 
     for i in 1..=runs {
         let t = Instant::now();
-        let from = archive.tail_rebuild_start(&touched.chat_id, &touched.earliest_changed_timestamp)?;
+        let from =
+            archive.tail_rebuild_start(&touched.chat_id, &touched.earliest_changed_timestamp)?;
         let tail_start_ms = t.elapsed().as_millis();
 
         let t = Instant::now();
@@ -313,9 +314,7 @@ fn measure_point(
 
         // Scoped ref path alone (post-item-3).
         let t = Instant::now();
-        archive.in_transaction(|| {
-            archive.rebuild_reply_and_parent_refs_for_chats(&[chat_id])
-        })?;
+        archive.in_transaction(|| archive.rebuild_reply_and_parent_refs_for_chats(&[chat_id]))?;
         let ref_scoped_ms = t.elapsed().as_millis();
 
         println!(

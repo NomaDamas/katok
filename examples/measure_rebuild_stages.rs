@@ -74,7 +74,8 @@ fn main() -> anyhow::Result<()> {
         let mut rows = 0usize;
         for chat in &touched {
             let t = Instant::now();
-            let from = archive.tail_rebuild_start(&chat.chat_id, &chat.earliest_changed_timestamp)?;
+            let from =
+                archive.tail_rebuild_start(&chat.chat_id, &chat.earliest_changed_timestamp)?;
             tail_start_ms += t.elapsed().as_millis();
             let t = Instant::now();
             rows += archive
