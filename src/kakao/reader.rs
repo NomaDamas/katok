@@ -41,6 +41,12 @@ struct RoomMeta {
     /// reconstruct a name when neither `chatName` nor a title exists. Empty when
     /// unavailable.
     display_member_ids: Vec<i64>,
+    /// An open chat's own name, from `NTOpenLink.linkName`.
+    ///
+    /// `NTChatRoom.chatName` is NULL for these, so without it the room falls
+    /// through to a reconstructed member list and ends up stored under a name
+    /// that appears nowhere in KakaoTalk.
+    open_link_name: Option<String>,
 }
 
 /// Open `path` with `key` as a passphrase in cipher-compatibility mode 3,
@@ -126,6 +132,7 @@ fn load_rooms(conn: &Connection) -> Result<HashMap<i64, RoomMeta>> {
                     title: None,
                     direct_member_id: direct_member,
                     display_member_ids: Vec::new(),
+                    open_link_name: None,
                 },
             ))
         })
@@ -137,6 +144,7 @@ fn load_rooms(conn: &Connection) -> Result<HashMap<i64, RoomMeta>> {
         rooms.entry(chat_id).or_insert(meta);
     }
     enrich_titles(conn, &mut rooms);
+    enrich_open_link_names(conn, &mut rooms);
     enrich_display_members(conn, &mut rooms);
     Ok(rooms)
 }
@@ -164,6 +172,37 @@ fn enrich_titles(conn: &Connection, rooms: &mut HashMap<i64, RoomMeta>) {
     for (chat_id, content) in rows.flatten() {
         if let Some(meta) = rooms.get_mut(&chat_id) {
             meta.title = Some(content);
+        }
+    }
+}
+
+/// Best-effort: fill `open_link_name` by joining `NTChatRoom.linkId` to
+/// `NTOpenLink.linkName`.
+///
+/// An open chat has no `chatName`, so without this it falls through to a
+/// reconstructed member list — a name that appears nowhere in the app, cannot be
+/// searched for, and cannot be passed to `katok send --room`. An install missing
+/// either column, or any read error, simply leaves the old behaviour rather than
+/// aborting the room load.
+fn enrich_open_link_names(conn: &Connection, rooms: &mut HashMap<i64, RoomMeta>) {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT r.chatId, l.linkName
+         FROM NTChatRoom r
+         JOIN NTOpenLink l ON l.linkId = r.linkId
+         WHERE r.linkId <> 0 AND l.linkName IS NOT NULL AND l.linkName <> ''",
+    ) else {
+        return;
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        let chat_id: i64 = row.get(0)?;
+        let name: String = row.get(1)?;
+        Ok((chat_id, name))
+    }) else {
+        return;
+    };
+    for (chat_id, name) in rows.flatten() {
+        if let Some(meta) = rooms.get_mut(&chat_id) {
+            meta.open_link_name = Some(name);
         }
     }
 }
@@ -213,6 +252,12 @@ fn resolve_chat_name(
         }
         if let Some(title) = &meta.title {
             return title.clone();
+        }
+        // An open chat carries its name on the link, not on the room. Ahead of
+        // the member fallback because that fallback invents a name nobody in
+        // KakaoTalk would recognise.
+        if let Some(link_name) = &meta.open_link_name {
+            return link_name.clone();
         }
         // Direct chat: the peer's nickname. Never the account owner itself
         // (a self-chat / anomalous room must fall through, not take our name).
@@ -267,12 +312,16 @@ fn load_users(conn: &Connection) -> Result<HashMap<i64, String>> {
     Ok(users)
 }
 
-/// Best-effort: parse `supplement` JSON for a referenced parent `logId` in the
-/// same chat. Only the JSON structure is inspected, never message bodies.
+/// Best-effort: parse an attachment/supplement JSON blob for a referenced
+/// parent `logId` in the same chat. Only the JSON structure is inspected, never
+/// message bodies.
 ///
-/// `supplement` is present on ~64% of messages (media/attachment/link-preview
-/// metadata, not just replies), so this is deliberately conservative to avoid
-/// synthesizing false reply edges:
+/// Callers pass the `attachment` column first. A KakaoTalk reply (`type` 26)
+/// stores `src_logId` at the top level of `attachment`, so a reader that
+/// consults only `supplement` resolves no replies.
+///
+/// Both columns carry metadata for non-reply reasons too, so this stays
+/// deliberately conservative to avoid synthesizing false reply edges:
 ///   * only reply-specific keys are accepted (the bare generic `logId` is NOT,
 ///     since media supplements legitimately embed it for non-reply reasons);
 ///   * those keys are looked up directly on the top-level object and, by
@@ -351,7 +400,7 @@ fn read_one(
 
     let mut stmt = conn
         .prepare(
-            "SELECT chatId, logId, authorId, type, message, sentAt, supplement
+            "SELECT chatId, logId, authorId, type, message, sentAt, supplement, attachment
              FROM NTChatMessage
              WHERE message IS NOT NULL AND message <> ''",
         )
@@ -370,8 +419,9 @@ fn read_one(
             // sentAt is epoch seconds; tolerate a float column by reading f64.
             let sent_at: f64 = row.get::<_, f64>(5).unwrap_or(0.0);
             let supplement: Option<String> = row.get(6)?;
+            let attachment: Option<String> = row.get(7)?;
             Ok((
-                chat_id, log_id, author_id, msg_type, text, sent_at, supplement,
+                chat_id, log_id, author_id, msg_type, text, sent_at, supplement, attachment,
             ))
         })
         .map_err(Error::Sql)?;
@@ -381,13 +431,14 @@ fn read_one(
     // otherwise-healthy read. Row content is never logged.
     let mut skipped_rows: usize = 0;
     for row in rows {
-        let (chat_id, log_id, author_id, msg_type, text, sent_at, supplement) = match row {
-            Ok(values) => values,
-            Err(_) => {
-                skipped_rows += 1;
-                continue;
-            }
-        };
+        let (chat_id, log_id, author_id, msg_type, text, sent_at, supplement, attachment) =
+            match row {
+                Ok(values) => values,
+                Err(_) => {
+                    skipped_rows += 1;
+                    continue;
+                }
+            };
 
         let room = rooms.get(&chat_id);
         let chat_type = room
@@ -425,7 +476,10 @@ fn read_one(
             format!("type_{msg_type}")
         };
 
-        let reply_to_message_id = reply_parent_log_id(supplement.as_deref())
+        // `attachment` first: KakaoTalk replies carry `src_logId` there, so
+        // checking only `supplement` misses them.
+        let reply_to_message_id = reply_parent_log_id(attachment.as_deref())
+            .or_else(|| reply_parent_log_id(supplement.as_deref()))
             .filter(|parent| *parent != log_id)
             .map(|parent| format!("{chat_id}-{parent}"));
 

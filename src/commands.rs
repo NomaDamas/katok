@@ -4,12 +4,17 @@ use crate::support::{dependency_status, print_payload};
 use anyhow::{Context, Result};
 use katok::{
     archive::Archive,
-    chunking::{rebuild_chunks_with_settings, ChunkSettings},
+    chunking::{
+        rebuild_chunks_for_chats, rebuild_chunks_with_settings, ChunkSettings, CHUNKER_VERSION,
+    },
     config::KatokConfig,
     search::{bm25_search_with_snippet, keyword_search_with_snippet},
     semantic::{semantic_search_live_with_config, semantic_search_with_snippet},
+    transcript::export_transcript,
+    types::SyncTimings,
 };
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 mod chunk_commands;
 mod freshness;
@@ -34,9 +39,26 @@ pub(crate) fn run(
             archive_path,
             semantic_dir,
         ),
-        Commands::Sync { source, path, json } => {
+        Commands::Sync {
+            source,
+            path,
+            json,
+            touched,
+            prune_preview,
+            prune_deleted,
+        } => {
             let source = source.unwrap_or_else(|| config.source_adapter.clone());
-            run_sync(&source, path, json, &config, &archive_path, &data_dir)
+            run_sync(
+                &source,
+                path,
+                json,
+                touched,
+                prune_preview,
+                prune_deleted,
+                &config,
+                &archive_path,
+                &data_dir,
+            )
         }
         Commands::Index {
             full,
@@ -57,8 +79,203 @@ pub(crate) fn run(
         Commands::Media { command } => media_commands::run(command, &data_dir),
         Commands::Permissions { command } => run_permissions(command),
         Commands::Chunks { chat, json } => run_chunks(&chat, json, &archive_path),
+        Commands::Transcript {
+            chat,
+            since,
+            out,
+            json,
+        } => run_transcript(&chat, since.as_deref(), out, json, &archive_path, &data_dir),
         Commands::WipeIndex { yes, json } => run_wipe_index(yes, json, &semantic_dir),
+        #[cfg(all(target_os = "macos", feature = "private-send"))]
+        Commands::Send {
+            room,
+            chat,
+            text,
+            image,
+            list_windows,
+            list_rooms,
+            limit,
+            dry_run,
+            no_open,
+            draft,
+            take_focus_now,
+            focus_wait,
+            json,
+        } => run_send(
+            room,
+            chat,
+            text,
+            image,
+            list_windows,
+            list_rooms,
+            limit,
+            dry_run,
+            no_open,
+            draft,
+            take_focus_now,
+            focus_wait,
+            json,
+            &archive_path,
+        ),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(all(target_os = "macos", feature = "private-send"))]
+fn run_send(
+    room: Option<String>,
+    chat: Option<String>,
+    text: Option<String>,
+    image: Option<PathBuf>,
+    list_windows: bool,
+    list_rooms: bool,
+    limit: usize,
+    dry_run: bool,
+    no_open: bool,
+    draft: bool,
+    take_focus_now: bool,
+    focus_wait: u64,
+    json: bool,
+    archive_path: &Path,
+) -> Result<()> {
+    use katok::kakao::ax_send;
+    use std::io::Read;
+
+    if list_windows {
+        let titles = ax_send::open_window_titles()?;
+        return print_payload(json, &serde_json::json!({ "open_windows": titles }));
+    }
+    if list_rooms {
+        let rooms = ax_send::chat_list_rooms(limit)?;
+        return print_payload(json, &serde_json::json!({ "rooms": rooms }));
+    }
+
+    let allow_open = !no_open;
+    // Anything that has to bring KakaoTalk forward waits for a gap in the user's
+    // own typing first, so a send never lands mid-keystroke.
+    let policy = if take_focus_now {
+        ax_send::FocusPolicy::immediate()
+    } else {
+        ax_send::FocusPolicy {
+            max_wait: std::time::Duration::from_secs(focus_wait),
+            ..ax_send::FocusPolicy::default()
+        }
+    };
+
+    // Read stdin before the curtain goes up: a blocked terminal behind a
+    // full-screen overlay waiting for input the user cannot give would be a
+    // deadlock they can only escape by killing the process.
+    let body = if dry_run || image.is_some() {
+        None
+    } else {
+        let body = match text {
+            Some(t) => t,
+            None => {
+                let mut buf = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut buf)
+                    .context("failed to read message body from stdin")?;
+                buf
+            }
+        };
+        let body = body.trim_end_matches('\n').to_string();
+        if body.is_empty() {
+            anyhow::bail!("refusing to send an empty message");
+        }
+        Some(body)
+    };
+
+    // The curtain owns the main thread — AppKit insists on it — so the send runs
+    // on a worker. It only actually covers the screen for the steps that must
+    // bring KakaoTalk forward; an ordinary background text send never raises it.
+    // Resolve the target once. A `--chat` id also brings the last-message time,
+    // which is the only thing on the chat list that separates two rooms sharing
+    // a name — without it such a send is refused rather than sent to whichever
+    // one happens to sit higher.
+    let target = match (&room, &chat) {
+        (_, Some(chat_id)) => {
+            let archive = Archive::open(archive_path).context("open archive")?;
+            let (name, rank) = archive
+                .chat_identity(chat_id)
+                .context("look up chat")?
+                .with_context(|| format!("no chat {chat_id} in the archive; run sync first"))?;
+            ax_send::RoomTarget {
+                name,
+                rank: Some(rank),
+            }
+        }
+        (Some(name), None) => ax_send::RoomTarget::named(name),
+        (None, None) => anyhow::bail!("pass --room or --chat"),
+    };
+    let room_display = target.name.clone();
+    let target_owned = target.clone();
+    let image_owned = image.clone();
+    let body_owned = body.clone();
+    // The curtain says what is actually happening. It used to read "전송중" for
+    // every operation, including ones that send nothing at all — the same kind
+    // of claim that made a draft mode report `sent: false` while delivering.
+    let curtain_title = if dry_run {
+        "카톡 채팅방 여는 중"
+    } else if draft {
+        "카톡 초안 넣는 중"
+    } else if image.is_some() {
+        "카톡 이미지 보내는 중"
+    } else {
+        "카톡 보내는 중"
+    };
+    let outcome = katok::kakao::send_curtain::run_with_curtain(curtain_title, move |curtain| {
+        let ctx = ax_send::SendContext {
+            policy,
+            curtain: Some(curtain),
+        };
+        if dry_run {
+            return ax_send::resolve_room_window(&target_owned, allow_open, &ctx);
+        }
+        if let Some(path) = &image_owned {
+            return ax_send::send_image_to_open_window(&target_owned, path, allow_open, &ctx);
+        }
+        let body = body_owned.expect("text body prepared before the curtain");
+        if draft {
+            return ax_send::draft_to_open_window(&target_owned, &body, allow_open, &ctx);
+        }
+        ax_send::send_to_open_window(&target_owned, &body, allow_open, &ctx)
+    });
+
+    match outcome {
+        Ok(result) => result?,
+        // The worker panicked. Input and focus were already handed back by the
+        // curtain's own scope guards, so report rather than resume it.
+        Err(_) => anyhow::bail!("the send thread panicked; nothing was confirmed sent"),
+    }
+
+    if dry_run {
+        return print_payload(
+            json,
+            &serde_json::json!({ "resolved": true, "room": room_display, "sent": false }),
+        );
+    }
+    if let Some(path) = image {
+        // Report the file name only; the path can leak directory structure into logs.
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("(unnamed)");
+        return print_payload(
+            json,
+            &serde_json::json!({ "sent": true, "room": room_display, "image": name }),
+        );
+    }
+    // Never echo the body: sent content is as sensitive as anything else this crate handles.
+    let chars = body.map(|b| b.chars().count()).unwrap_or(0);
+    print_payload(
+        json,
+        &serde_json::json!({
+            "sent": !draft,
+            "drafted": draft,
+            "room": room_display,
+            "chars": chars
+        }),
+    )
 }
 
 fn run_permissions(command: PermissionsCommand) -> Result<()> {
@@ -131,27 +348,147 @@ fn macos_probe_payload(enabled: bool, data_dir: &Path) -> serde_json::Value {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_sync(
     source: &str,
     path: Option<PathBuf>,
     json: bool,
+    include_touched: bool,
+    prune_preview: bool,
+    prune_deleted: bool,
     config: &KatokConfig,
     archive_path: &Path,
     data_dir: &Path,
 ) -> Result<()> {
     let adapter = adapter_for_source(source, path, data_dir)?;
+    let read_started = Instant::now();
     let messages = adapter.messages().context("read source messages")?;
+    let read_source = read_started.elapsed().as_millis();
     let archive = Archive::open(archive_path).context("open archive")?;
-    let mut report = archive.sync_messages(&messages).context("sync messages")?;
-    report.chunks = rebuild_chunks_with_settings(
-        &archive,
-        ChunkSettings {
+    // Message upserts and the chunk rebuild are one unit: chunks derived from half-written
+    // messages are not a usable archive state, so either both land or neither does.
+    let report = archive.in_transaction(|| {
+        let upsert_started = Instant::now();
+        let mut report = archive.sync_messages(&messages).context("sync messages")?;
+        let upsert_messages = upsert_started.elapsed().as_millis();
+
+        // Before chunking, so a removed message never reaches a chunk. Inside
+        // the same transaction, so a failure anywhere leaves nothing deleted.
+        let pruned = if prune_preview || prune_deleted {
+            let doomed = archive
+                .reconcile_deletions(&messages, prune_deleted)
+                .context("reconcile deletions")?;
+            if prune_deleted {
+                // Their chats have to be rechunked for the removal to reach the
+                // chunk text and the index, not just the messages table.
+                for chat_id in doomed
+                    .iter()
+                    .map(|d| d.chat_id.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+                {
+                    if let Some(touched) = report
+                        .touched_chats
+                        .iter_mut()
+                        .find(|candidate| candidate.chat_id == chat_id)
+                    {
+                        // A later edit may already have put this chat in the
+                        // report with a tail floor after the deleted row. A
+                        // deletion has no surviving row that can safely anchor
+                        // a cut, so widen that existing touch to the whole chat.
+                        touched.earliest_changed_timestamp.clear();
+                        touched.earliest_changed_message_id.clear();
+                    } else {
+                        report.touched_chats.push(katok::types::TouchedChat {
+                            chat_id: chat_id.to_string(),
+                            earliest_changed_timestamp: String::new(),
+                            earliest_changed_message_id: String::new(),
+                        });
+                    }
+                }
+                report.rebuilt_chats = report.touched_chats.len();
+                report.total_messages = archive.message_count().context("count messages")?;
+            }
+            doomed
+        } else {
+            Vec::new()
+        };
+
+        let rebuild_started = Instant::now();
+        let settings = ChunkSettings {
             group_gap_seconds: config.chunk_gap_group_seconds,
             direct_gap_seconds: config.chunk_gap_direct_seconds,
-        },
-    )
-    .context("rebuild chunks")?;
+        };
+        // Recompute only the chats that changed. Three cases still need the full pass: a first
+        // sync has no chunks to scope to, a gap-settings change invalidates every existing
+        // chunk, and a chunker-version bump does the same — which includes the first run
+        // against an archive written before the version was recorded. Without these checks a
+        // settings or algorithm change would only ever reach rooms that happened to receive a
+        // message, leaving the rest on the old boundaries forever.
+        let stored_settings = archive
+            .stored_chunk_settings()
+            .context("read chunk settings")?;
+        let settings_changed = stored_settings
+            != Some((
+                settings.group_gap_seconds,
+                settings.direct_gap_seconds,
+                CHUNKER_VERSION,
+            ));
+        report.chunks = if archive.chunk_count().context("count chunks")? == 0 || settings_changed {
+            rebuild_chunks_with_settings(&archive, settings).context("rebuild chunks")?
+        } else {
+            rebuild_chunks_for_chats(&archive, settings, &report.touched_chats)
+                .context("rebuild chunks")?
+        };
+        archive
+            .record_chunk_settings(
+                settings.group_gap_seconds,
+                settings.direct_gap_seconds,
+                CHUNKER_VERSION,
+            )
+            .context("record chunk settings")?;
+
+        report.timings_ms = SyncTimings {
+            read_source,
+            upsert_messages,
+            rebuild_chunks: rebuild_started.elapsed().as_millis(),
+        };
+        Ok::<_, anyhow::Error>((report, pruned))
+    })?;
+    let (mut report, pruned) = report;
+    // Gate is output-only: the archive always computed touched_chats for the rebuild above.
+    report.include_touched = include_touched;
     freshness::record_sync(data_dir, source, report.total_messages, report.chunks)?;
+
+    if prune_preview || prune_deleted {
+        let mut payload = serde_json::to_value(&report).context("serialize sync report")?;
+        if let Some(map) = payload.as_object_mut() {
+            map.insert(
+                if prune_deleted {
+                    "pruned_messages".to_string()
+                } else {
+                    "prunable_messages".to_string()
+                },
+                serde_json::to_value(&pruned).context("serialize pruned")?,
+            );
+        }
+        return print_payload(json, &payload);
+    }
+    print_payload(json, &report)
+}
+
+fn run_transcript(
+    chat: &str,
+    since: Option<&str>,
+    out: Option<PathBuf>,
+    json: bool,
+    archive_path: &Path,
+    data_dir: &Path,
+) -> Result<()> {
+    let archive = Archive::open(archive_path).context("open archive")?;
+    // Transcripts hold raw message bodies, so they default under the katok data dir rather than
+    // the working directory, where they could be committed by accident.
+    let out_dir = out.unwrap_or_else(|| data_dir.join("transcripts"));
+    let report = export_transcript(&archive, chat, since, &out_dir).context("export transcript")?;
     print_payload(json, &report)
 }
 

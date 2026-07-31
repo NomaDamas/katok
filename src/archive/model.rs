@@ -52,3 +52,11 @@ impl StoredMessage {
         })
     }
 }
+
+/// A message the source no longer reports, inside the range it still covers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DeletedMessage {
+    pub account_hash: String,
+    pub chat_id: String,
+    pub message_id: String,
+}

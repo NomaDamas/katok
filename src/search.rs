@@ -133,10 +133,49 @@ fn snippet(text: &str, query: &str, max_chars: usize) -> String {
     if trimmed.chars().count() <= max_chars {
         return trimmed.to_string();
     }
-    let start = trimmed.find(query).unwrap_or(0);
+    // `find` reports a BYTE offset while `skip` counts CHARS. Passing one to the
+    // other overshoots by the encoding width — about 3x for Hangul — so a hit
+    // late in a long Korean chunk skipped past the end and returned "".
+    let start_char = trimmed
+        .find(query)
+        .map(|byte_offset| trimmed[..byte_offset].chars().count())
+        .unwrap_or(0);
     trimmed
         .chars()
-        .skip(start.saturating_sub(20))
+        .skip(start_char.saturating_sub(20))
         .take(max_chars)
         .collect()
+}
+
+#[cfg(test)]
+mod snippet_tests {
+    use super::snippet;
+
+    #[test]
+    fn korean_hit_late_in_a_long_chunk_is_still_shown() {
+        // 3 bytes per char: a char-300 hit sits at byte 900, and skipping 900
+        // chars ran off the end of a 605-char text.
+        let text = format!("{}찾는말{}", "가".repeat(300), "나".repeat(302));
+        let out = snippet(&text, "찾는말", 120);
+
+        assert!(!out.is_empty(), "snippet must not be empty");
+        assert!(
+            out.contains("찾는말"),
+            "snippet must contain the match: {out}"
+        );
+        assert_eq!(out.chars().count(), 120);
+    }
+
+    #[test]
+    fn ascii_behaviour_is_unchanged() {
+        let text = format!("{}needle{}", "a".repeat(300), "b".repeat(300));
+        let out = snippet(&text, "needle", 120);
+        assert!(out.contains("needle"));
+        assert!(out.starts_with(&"a".repeat(20)));
+    }
+
+    #[test]
+    fn short_text_is_returned_whole() {
+        assert_eq!(snippet("  짧은 글  ", "글", 120), "짧은 글");
+    }
 }

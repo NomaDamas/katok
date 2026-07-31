@@ -7,6 +7,7 @@ pub mod kakao;
 pub mod paths;
 pub mod search;
 pub mod semantic;
+pub mod transcript;
 pub mod types;
 
 pub type Result<T> = std::result::Result<T, Error>;

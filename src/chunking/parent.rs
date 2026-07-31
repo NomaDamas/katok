@@ -56,21 +56,27 @@ fn current_parent_len(chunks: &[ChunkDraft]) -> usize {
 fn parent_segments_from_chunks(chunks: &[ChunkDraft]) -> Result<Vec<ParentChunkDraft>> {
     let first = chunks.first().ok_or(crate::Error::EmptyChunk)?;
     let mut segments = Vec::new();
-    let mut segment = ParentSegment::new(first);
+    let mut ordinal = 0usize;
+    let mut segment = ParentSegment::new(first, ordinal);
 
     for chunk in chunks {
         let line = parent_line(chunk);
         let chars = line.chars().collect::<Vec<_>>();
         let mut offset = 0;
+        // Only the segment that first receives a chunk counts its messages; the
+        // continuations are the same chunk spilling over a character limit.
+        let mut counted = false;
         while offset < chars.len() {
             if segment.remaining() == 0 {
                 segments.push(segment.into_draft()?);
-                segment = ParentSegment::new(chunk);
+                ordinal += 1;
+                segment = ParentSegment::new(chunk, ordinal);
             }
             if !segment.text.is_empty() {
                 if segment.remaining() == 1 {
                     segments.push(segment.into_draft()?);
-                    segment = ParentSegment::new(chunk);
+                    ordinal += 1;
+                    segment = ParentSegment::new(chunk, ordinal);
                 } else {
                     segment.text.push('\n');
                 }
@@ -79,7 +85,8 @@ fn parent_segments_from_chunks(chunks: &[ChunkDraft]) -> Result<Vec<ParentChunkD
             for ch in &chars[offset..offset + take] {
                 segment.text.push(*ch);
             }
-            segment.add_child(chunk);
+            segment.add_child(chunk, !counted);
+            counted = true;
             offset += take;
         }
     }
@@ -95,6 +102,15 @@ fn parent_line(chunk: &ChunkDraft) -> String {
 }
 
 struct ParentSegment {
+    /// Position of this segment among those cut from the same run of chunks.
+    ///
+    /// Without it, two segments split out of one oversized chunk share
+    /// `first_child`, `last_child` and — when the chunk repeats itself, as a
+    /// pasted log or a wall of identical messages does — the same text, so they
+    /// hash to the same `parent_id` and the insert violates the primary key.
+    /// Since the whole sync runs in one transaction, that rolls the sync back
+    /// and every later run fails on the same messages forever.
+    ordinal: usize,
     account_hash: String,
     chat_id: String,
     chat_name: String,
@@ -106,8 +122,9 @@ struct ParentSegment {
 }
 
 impl ParentSegment {
-    fn new(chunk: &ChunkDraft) -> Self {
+    fn new(chunk: &ChunkDraft, ordinal: usize) -> Self {
         Self {
+            ordinal,
             account_hash: chunk.account_hash.clone(),
             chat_id: chunk.chat_id.clone(),
             chat_name: chunk.chat_name.clone(),
@@ -123,12 +140,22 @@ impl ParentSegment {
         DEFAULT_PARENT_WINDOW_MAX_CHARS.saturating_sub(self.text.chars().count())
     }
 
-    fn add_child(&mut self, chunk: &ChunkDraft) {
+    /// Attach `chunk` to this segment.
+    ///
+    /// `counts_messages` is false when the chunk is only being continued into
+    /// this segment because its text overflowed the previous one. Counting it
+    /// again would report the chunk's messages once per segment it spills
+    /// across, which is the number `chunk parent` and the parent-window search
+    /// hit show the reader — three windows each claiming all four messages of a
+    /// single split chunk.
+    fn add_child(&mut self, chunk: &ChunkDraft, counts_messages: bool) {
         self.ended_at = chunk.ended_at.clone();
         if self.child_chunk_ids.iter().any(|id| id == &chunk.chunk_id) {
             return;
         }
-        self.message_count += chunk.message_ids.len();
+        if counts_messages {
+            self.message_count += chunk.message_ids.len();
+        }
         self.child_chunk_ids.push(chunk.chunk_id.clone());
     }
 
@@ -150,6 +177,7 @@ impl ParentSegment {
                 &first_child,
                 &last_child,
                 &self.text,
+                self.ordinal,
             ),
             account_hash: self.account_hash,
             chat_id: self.chat_id,
@@ -169,6 +197,7 @@ fn stable_parent_id(
     first_id: &str,
     last_id: &str,
     text: &str,
+    ordinal: usize,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(account_hash.as_bytes());
@@ -178,6 +207,8 @@ fn stable_parent_id(
     hasher.update(first_id.as_bytes());
     hasher.update(b"|");
     hasher.update(last_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(ordinal.to_string().as_bytes());
     hasher.update(b"|parent-window-v1");
     hasher.update(text.as_bytes());
     let digest = hasher.finalize();
