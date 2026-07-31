@@ -50,6 +50,7 @@ fn open_with_schema(path: &Path, key: &str) -> Connection {
             authorId INTEGER NOT NULL DEFAULT 0,
             type INTEGER NOT NULL DEFAULT -1,
             supplement TEXT,
+            attachment TEXT,
             message TEXT,
             sentAt INTEGER DEFAULT 0,
             PRIMARY KEY (chatId, logId, msgId)
@@ -89,14 +90,20 @@ fn create_encrypted_db(path: &Path, key: &str) {
 
     // Messages: direct text, group text, a non-text type, and a reply.
     conn.execute(
-        "INSERT INTO NTChatMessage(chatId, logId, msgId, authorId, type, supplement, message, sentAt)
+        "INSERT INTO NTChatMessage(chatId, logId, msgId, authorId, type, supplement, attachment, message, sentAt)
          VALUES
-            (100, 10, 1, 500, 1, NULL, 'direct hello', 1700000000),
-            (100, 11, 2, 1000000001, 1, NULL, 'direct reply body', 1700000100),
-            (200, 20, 3, 600, 1, NULL, 'group message', 1700000200),
-            (200, 21, 4, 500, 26, NULL, 'image caption', 1700000300),
-            (200, 22, 5, 600, 1, '{\"reply\":{\"src_logId\":20}}', 'this is a reply', 1700000400),
-            (200, 23, 6, 500, 1, NULL, '', 1700000500)",
+            (100, 10, 1, 500, 1, NULL, NULL, 'direct hello', 1700000000),
+            (100, 11, 2, 1000000001, 1, NULL, NULL, 'direct reply body', 1700000100),
+            (200, 20, 3, 600, 1, NULL, NULL, 'group message', 1700000200),
+            (200, 21, 4, 500, 26, NULL, NULL, 'image caption', 1700000300),
+            (200, 22, 5, 600, 1, '{\"reply\":{\"src_logId\":20}}', NULL, 'this is a reply', 1700000400),
+            (200, 23, 6, 500, 1, NULL, NULL, '', 1700000500),
+            -- Shaped the way a real KakaoTalk reply is: type 26, src_logId at
+            -- the top level of `attachment`, and `supplement` empty. Measured on
+            -- a live install as 6891 of 6891 replies. The row above it is the
+            -- hypothetical `supplement` shape the reader used to look for, which
+            -- is why the old fixture passed while nothing resolved in practice.
+            (200, 24, 7, 600, 26, NULL, '{\"src_logId\":20,\"src_type\":1,\"src_userId\":600}', 'real-shaped reply', 1700000600)",
         [],
     )
     .expect("insert messages");
@@ -128,8 +135,8 @@ fn reads_synthetic_kakao_db_and_maps_model() {
     };
     let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
 
-    // Empty-text message (logId 23) is filtered out → 5 messages remain.
-    assert_eq!(output.messages.len(), 5);
+    // Empty-text message (logId 23) is filtered out → 6 messages remain.
+    assert_eq!(output.messages.len(), 6);
 
     // Two chats discovered with correct classification.
     assert_eq!(output.chats.len(), 2);
@@ -185,6 +192,12 @@ fn reads_synthetic_kakao_db_and_maps_model() {
     let reply = by_id("200-22");
     assert_eq!(reply.reply_to_message_id.as_deref(), Some("200-20"));
 
+    // The shape real KakaoTalk actually writes: `src_logId` on `attachment`,
+    // nothing in `supplement`. Reading only `supplement` resolved zero replies
+    // on a live archive while every unit test stayed green.
+    let real_reply = by_id("200-24");
+    assert_eq!(real_reply.reply_to_message_id.as_deref(), Some("200-20"));
+
     // Account hash is the stable sha256(user_id) for every row.
     let account = &output.messages[0].account_hash;
     assert_eq!(account.len(), 64);
@@ -200,7 +213,7 @@ fn reads_synthetic_kakao_db_and_maps_model() {
         .filter(|message| message.chat_id == "200")
         .map(|message| message.message_id.as_str())
         .collect();
-    assert_eq!(chat_200, vec!["200-20", "200-21", "200-22"]);
+    assert_eq!(chat_200, vec!["200-20", "200-21", "200-22", "200-24"]);
 }
 
 /// A single malformed message row (a non-UTF8 BLOB stored in the TEXT `message`
@@ -288,8 +301,8 @@ fn discovers_and_reads_db_suffixed_file() {
     };
     let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
 
-    // Same content as the bare-named DB: 5 mapped messages, 2 chats.
-    assert_eq!(output.messages.len(), 5);
+    // Same content as the bare-named DB: 6 mapped messages, 2 chats.
+    assert_eq!(output.messages.len(), 6);
     assert_eq!(output.chats.len(), 2);
 }
 
@@ -467,6 +480,7 @@ fn reads_older_schema_without_title_or_member_columns() {
             authorId INTEGER NOT NULL DEFAULT 0,
             type INTEGER NOT NULL DEFAULT -1,
             supplement TEXT,
+            attachment TEXT,
             message TEXT,
             sentAt INTEGER DEFAULT 0,
             PRIMARY KEY (chatId, logId, msgId)

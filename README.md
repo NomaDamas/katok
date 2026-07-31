@@ -77,7 +77,7 @@ katok doctor --macos-probe --json
 scripts/katok-macos-setup.sh
 ```
 
-자세한 흐름은 `docs/macos-first-run.md`에 있습니다.
+자세한 흐름은 `docs/macos-first-run.md`에 있습니다. 카카오톡 DB 스키마, 미디어 캐시 파일명 규칙, Pkv2 복호화, WAL 읽기 불변식 같은 내부 구조는 `docs/kakao-media-internals.md`에 정리돼 있습니다.
 
 ## 기본 사용 흐름
 
@@ -107,22 +107,37 @@ katok chunk parent <chunk-id> --json
 - `chunk context`는 같은 채팅방의 바로 앞뒤 chunk를 보여줍니다.
 - `chunk parent`는 semantic search가 사용한 더 큰 parent window를 보여줍니다.
 
-카카오톡 이미지 메시지의 로컬 캐시를 추출하려면 media 명령을 사용합니다.
+카카오톡 첨부를 추출하려면 media 명령을 사용합니다. 사진(type 2), 앨범(type 27), 영상(type 3), 그리고 일반 파일(type 18)을 다룹니다. 일반 파일은 하나의 메시지 타입이 zip·pdf·xlsx·hwp·pptx 등 모든 확장자를 덮으므로 형식별 대응이 따로 필요하지 않습니다.
 
 ```bash
 katok media get --chat <chat-id> --json
+katok media get --chat <chat-id> --kind file --json
 katok media get --chat <chat-id> --log <log-id> --out ./katok-media --no-cdn --json
 ```
 
-`media get`은 type 2 단일 사진과 type 27 앨범 프레임을 읽고, 각 프레임을 로컬 full `.img`, CDN presigned GET, 로컬 thumbnail `.thm`, stub 순서로 해석합니다. 이미지 추출 자체가 사용자가 `media get`을 실행해 opt in하는 기능이며, 이 명령에서 네트워크를 사용할 수 있는 유일한 동작은 attachment metadata의 CDN presigned GET입니다. CDN 응답은 `cs` SHA-1과 일치한 bytes만 저장하며, `--no-cdn`을 주면 CDN tier를 끄고 로컬 `.img`/`.thm`/stub만 사용합니다. 기본 출력 위치는 katok data directory 아래 `media/<chat-id>/`입니다.
+각 프레임은 로컬 full 캐시(`.img`/`.vid`), CDN presigned GET, 로컬 thumbnail `.thm`, stub 순서로 해석됩니다. 추출 자체가 사용자가 명령을 실행해 opt in하는 기능이며, 네트워크를 사용하는 유일한 동작은 attachment metadata의 CDN presigned GET입니다. CDN 응답은 `cs` SHA-1과 일치한 bytes만 저장하고, `--no-cdn`을 주면 CDN tier를 끄고 로컬 캐시만 사용합니다. 기본 출력 위치는 katok data directory 아래 `media/<chat-id>/`입니다.
+
+**일반 파일은 로컬 캐시가 없습니다.** 카카오톡은 사진·영상만 컨테이너에 캐시하고 파일 첨부는 디스크에 남기지 않으므로, 파일의 tier는 CDN 하나뿐이고 `--no-cdn`으로는 아무것도 받을 수 없습니다. 저장 파일명은 첨부의 원본 이름을 그대로 씁니다(`<logId>_<원본이름>`) — zip 본문은 확장자 sniffing으로 `.bin`이 되므로 이름이 확장자의 권위입니다.
+
+**presigned 서명은 약 14일 뒤 만료되고, 만료되면 410으로 사라집니다.** 로컬 사본이 없는 파일 첨부에서는 이것이 곧 영구 유실을 뜻하므로, 정기적으로 `media backfill`을 돌려 창이 닫히기 전에 보존하는 것이 이 기능의 실제 사용법입니다.
+
+```bash
+katok media backfill --dry-run --json
+katok media backfill --json
+katok media backfill --kind file --kind video --json
+```
+
+`backfill`은 미디어가 있는 모든 방을 돌면서 아직 만료되지 않은 링크만 받습니다. 이미 저장된 프레임은 네트워크 호출 없이 건너뛰므로 재실행이 멱등하고, 중단된 실행을 그대로 이어받습니다. 기본 kind는 `file`입니다(사진·영상은 로컬 캐시가 있지만 파일은 없기 때문). `--dry-run`은 요청을 한 번도 보내지 않고 각 프레임이 어느 tier로 갈지만 보고하므로, 받을 대상과 만료된 대상을 미리 구분할 수 있습니다.
 
 `--json` 출력 스키마의 주요 필드는 다음과 같습니다.
 
-- `chat_id`, `log_id`, `limit`, `output_dir`, `cdn_enabled`
-- `frame_count`: 읽은 이미지 frame 수
-- `records[]`: `logId`, `idx`, `w`, `h`, `cs`, `tier`, `tier_reason`, `path`, `sha1`, `sender`, `ts`
+- `chat_id`, `log_id`, `limit`, `kinds`, `output_dir`, `cdn_enabled`
+- `frame_count`: 읽은 frame 수
+- `records[]`: `logId`, `idx`, `kind`, `name`, `w`, `h`, `cs`, `s`, `tier`, `tier_reason`, `path`, `sha1`, `sender`, `ts`
 - `errors[]`: tier 실패 관측값, `logId`, `idx`, `stage`, `path`, `error`
-- `tier_counts`: `full`, `cdn`, `thumb`, `stub` 별 개수
+- `tier_counts`: `full`, `cdn`, `thumb`, `stub`, `existing`, `planned` 별 개수
+
+`tier_reason`은 왜 그 tier로 떨어졌는지 말합니다. `cdn-expired`는 서명 만료, `cdn-too-large`는 선언 크기가 `--max-bytes`를 넘어 요청 전에 거절, `cdn-unverifiable`은 `cs` 지문이 없어 검증할 수 없어 거절, `unavailable`은 로컬 캐시가 애초에 존재하지 않는 파일 첨부를 뜻합니다.
 
 ## 검색 방식
 
@@ -191,6 +206,8 @@ katok chunk get <chunk-id> --json
 
 `katok sync --source macos`는 Rust 코드로 카카오톡 macOS 설치를 직접 읽습니다. 런타임에 Python, `kakaocli`, 별도 helper 서버가 필요 없습니다.
 
+sync는 자주 실행해도 되도록 증분으로 동작합니다. 메시지가 실제로 바뀐 채팅방의 tail만 다시 계산하므로, 일반적인 append sync 비용은 전체 아카이브 크기보다 변경 범위에 가깝게 움직입니다. 전량을 다시 계산하는 경우는 세 가지입니다. 빈 아카이브에 처음 실행하는 sync, `chunk_gap_group_seconds`/`chunk_gap_direct_seconds` 를 바꾼 뒤 처음 실행하는 sync, 그리고 chunk 경계 규칙이 바뀐 버전으로 올린 뒤 처음 실행하는 sync 입니다. 이 버전을 기록하기 전에 만들어진 기존 아카이브도 여기 해당하므로 업그레이드 직후 sync 한 번은 전량을 다시 계산합니다. 그 뒤로는 다시 증분으로 돌아옵니다. 출력에 `rebuilt_chats`와 단계별 소요 시간(`timings_ms`의 `read_source`, `upsert_messages`, `rebuild_chunks`)이 포함되므로 느린 실행의 원인을 단계 단위로 확인할 수 있습니다.
+
 요구사항:
 
 - 터미널 앱이 `~/Library/Containers/com.kakao.KakaoTalkMac/` 아래 파일을 읽을 수 있도록 전체 디스크 접근 권한을 받아야 합니다.
@@ -203,6 +220,8 @@ fixture로 개발/테스트할 때는 실제 카카오톡 설치가 필요 없�
 katok source chats --source fixture tests/fixtures/kakao/replies.jsonl --json
 katok sync --source fixture tests/fixtures/kakao/replies.jsonl --json
 ```
+
+합성 데이터로 실행할 때는 `--data-dir <임시경로>` 플래그로 반드시 격리하세요. `KATOK_DATA_DIR` 환경변수는 없습니다. 설정해도 조용히 무시되고 실제 아카이브에 기록됩니다.
 
 ## CLI 명령 요약
 
@@ -218,9 +237,13 @@ katok search semantic "회의 보고서" --json
 katok chunk get <chunk-id> --json
 katok chunk context <chunk-id> --json
 katok chunk parent <chunk-id> --json
+katok transcript --chat <chat-id> --json
+katok transcript --chat <chat-id> --since 2026-07-20T00:00:00+09:00 --json
 katok media get --chat <chat-id> --no-cdn --json
 katok wipe-index --yes --json
 ```
+
+`katok transcript`는 한 채팅방에서 실제로 오간 말을 시간 순서대로 Markdown 파일로 내보냅니다. 검색이 "어떤 chunk가 관련 있나"에 답한다면 이 명령은 "무슨 말이 오갔나"에 답하므로, 방 하나를 밀린 채로 따라 읽을 때 씁니다. 라이브 카카오톡 DB가 아니라 아카이브를 읽으므로 최근 대화가 필요하면 `sync`를 먼저 실행합니다. 범위에 메시지가 없으면 파일을 만들지 않고, 파일 이름에 message id 범위가 들어가므로 나중 실행이 이전 결과를 덮어쓰지 않습니다. 카카오톡 시스템 메시지(입장·퇴장·초대)는 아카이브에는 남고 transcript에서만 빠집니다.
 
 권한 진단이 필요할 때만:
 

@@ -55,3 +55,6 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Personal project notes, never committed (public fork)
+CLAUDE.local.md

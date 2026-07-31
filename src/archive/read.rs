@@ -5,6 +5,35 @@ use crate::{
 };
 use rusqlite::{params, OptionalExtension};
 
+/// The backward walk over one chat's chunks that [`Archive::tail_rebuild_start`] drives.
+///
+/// Bound as `(?1 = chat_id, ?2 = the earliest changed timestamp)`. Lives here rather than inline
+/// so the query-plan test asserts against the text that actually runs. `idx_chunks_chat_started`
+/// serves all three parts of it — the equality, the range, and the descending order — so the walk
+/// visits the chat's newest chunks and stops, instead of sorting the whole table to find them.
+pub const TAIL_REBUILD_START_QUERY: &str = "SELECT started_at, ended_at FROM chunks
+     WHERE chat_id = ?1 AND started_at < ?2
+     ORDER BY started_at DESC";
+
+/// One chat's messages in send order, that [`Archive::raw_messages_for_chat_since`] runs.
+///
+/// Bound as `(?1 = chat_id, ?2 = an RFC3339 floor or NULL for the whole chat)`. Lives here rather
+/// than inline so the query-plan test asserts against the text that actually runs.
+///
+/// The floor is written as `timestamp >= COALESCE(?2, '')` rather than `?2 IS NULL OR
+/// timestamp >= ?2`: the two select the same rows — every stored `timestamp` is text, so a NULL
+/// floor collapsed to `''` still admits all of them — but only the `COALESCE` form is sargable, so
+/// SQLite can carry the floor into the index instead of filtering it row by row. With
+/// `idx_messages_chat_timestamp(chat_id, timestamp, message_id)` the plan is a single
+/// `SEARCH ... (chat_id=? AND timestamp>?)` that also serves the `ORDER BY`, so a scoped tail read
+/// touches only the tail and never sorts or scans the whole archive.
+pub const RAW_MESSAGES_FOR_CHAT_SINCE_QUERY: &str =
+    "SELECT account_hash, chat_id, chat_name, chat_type, message_id,
+            sender_nickname, timestamp, text, message_type
+     FROM messages
+     WHERE chat_id = ?1 AND timestamp >= COALESCE(?2, '')
+     ORDER BY timestamp, message_id";
+
 impl Archive {
     pub fn chunks_for_chat(&self, chat_id: &str) -> Result<Vec<ChunkSummary>> {
         let mut stmt = self
@@ -99,6 +128,49 @@ impl Archive {
             .collect()
     }
 
+    /// A chat's display name and the timestamp of its last message.
+    ///
+    /// `send` addresses rooms by the name KakaoTalk shows, and those names are
+    /// not unique — so the last-message time comes along as the only thing on
+    /// the chat list that tells two same-named rooms apart.
+    /// Returns the display name and, when other chats share it, how many of them
+    /// are more recently active.
+    ///
+    /// That count is the room's position among the same-named rows of the chat
+    /// list, which orders most-recent-first — and position survives what an
+    /// exact timestamp does not. The archive only knows what the last sync saw,
+    /// so in a room being typed in right now its idea of "last message" is stale
+    /// within a minute, while the ordering only changes if a *different*
+    /// same-named room overtakes it.
+    pub fn chat_identity(&self, chat_id: &str) -> Result<Option<(String, usize)>> {
+        let Some(name): Option<String> = self
+            .conn
+            .query_row(
+                "SELECT chat_name FROM messages WHERE chat_id = ?1 LIMIT 1",
+                [chat_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Error::Sql)?
+        else {
+            return Ok(None);
+        };
+        let rank: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM (
+                     SELECT chat_id, MAX(timestamp) AS last FROM messages
+                     WHERE chat_name = ?1 GROUP BY chat_id
+                 ) peers
+                 WHERE peers.chat_id <> ?2
+                   AND peers.last > (SELECT MAX(timestamp) FROM messages WHERE chat_id = ?2)",
+                params![name, chat_id],
+                |row| row.get(0),
+            )
+            .map_err(Error::Sql)?;
+        Ok(Some((name, rank as usize)))
+    }
+
     pub fn raw_messages(&self) -> Result<Vec<StoredMessage>> {
         let mut stmt = self
             .conn
@@ -110,6 +182,132 @@ impl Archive {
             .map_err(Error::Sql)?;
         let rows = stmt
             .query_map([], StoredMessage::from_row)
+            .map_err(Error::Sql)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Sql)?;
+        Ok(rows)
+    }
+
+    /// Same rows and same order as [`Archive::raw_messages`], restricted to `chat_ids`.
+    ///
+    /// The ordering must stay identical: chunk boundaries are decided by walking messages in
+    /// this order, so a different order would produce different chunks for the same data.
+    pub fn raw_messages_for_chats(&self, chat_ids: &[String]) -> Result<Vec<StoredMessage>> {
+        if chat_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", chat_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT account_hash, chat_id, chat_name, chat_type, message_id,
+                    sender_nickname, timestamp, text, message_type
+             FROM messages WHERE chat_id IN ({placeholders})
+             ORDER BY chat_id, timestamp, message_id"
+            ))
+            .map_err(Error::Sql)?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params_from_iter(chat_ids),
+                StoredMessage::from_row,
+            )
+            .map_err(Error::Sql)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Sql)?;
+        Ok(rows)
+    }
+
+    /// Messages of one chat in send order, optionally from `since` (RFC3339) onward.
+    ///
+    /// Same rows and same order as [`Archive::raw_messages`] for that chat. `None` reads the whole
+    /// chat; a floor reads only the tail the scoped rebuild recomputes.
+    pub fn raw_messages_for_chat_since(
+        &self,
+        chat_id: &str,
+        since: Option<&str>,
+    ) -> Result<Vec<StoredMessage>> {
+        let mut stmt = self
+            .conn
+            .prepare(RAW_MESSAGES_FOR_CHAT_SINCE_QUERY)
+            .map_err(Error::Sql)?;
+        let rows = stmt
+            .query_map(params![chat_id, since], StoredMessage::from_row)
+            .map_err(Error::Sql)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Sql)?;
+        Ok(rows)
+    }
+
+    /// The `started_at` a scoped rebuild of `chat_id` may start from, given the earliest changed
+    /// message's timestamp, or `None` when the whole chat must be rebuilt.
+    ///
+    /// Walks the chat's existing chunks backward from the change and returns the start of the
+    /// newest chunk whose gap to its predecessor exceeds `DEFAULT_PARENT_WINDOW_SECONDS`. That
+    /// chunk begins a parent window that a time gap fixes independently of any character
+    /// accumulation, so it is a stable boundary: everything before it is provably identical to a
+    /// full rebuild (docs/incremental-chunking-tail-scope.md). If no such interior boundary exists
+    /// the chat has no gap to cut at and is rebuilt whole.
+    ///
+    /// Reading from a time-gap boundary rather than the theoretically-minimal last window means a
+    /// character-split window is recomputed rather than reused, which stays correct and keeps the
+    /// scope independent of room size (bounded by the current conversation burst).
+    pub fn tail_rebuild_start(
+        &self,
+        chat_id: &str,
+        earliest_changed_timestamp: &str,
+    ) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare(TAIL_REBUILD_START_QUERY)
+            .map_err(Error::Sql)?;
+        let mut rows = stmt
+            .query(params![chat_id, earliest_changed_timestamp])
+            .map_err(Error::Sql)?;
+
+        // Iterating newest-first, `newer_started_at` holds the chunk just above the current row;
+        // the current (older) row's `ended_at` and that start bound the gap between them.
+        let mut newer_started_at: Option<String> = None;
+        while let Some(row) = rows.next().map_err(Error::Sql)? {
+            let started_at: String = row.get(0).map_err(Error::Sql)?;
+            let ended_at: String = row.get(1).map_err(Error::Sql)?;
+            if let Some(newer) = &newer_started_at {
+                let older_end =
+                    chrono::DateTime::parse_from_rfc3339(&ended_at).map_err(Error::Time)?;
+                let newer_start =
+                    chrono::DateTime::parse_from_rfc3339(newer).map_err(Error::Time)?;
+                let gap = newer_start.signed_duration_since(older_end).num_seconds();
+                if gap > crate::chunking::DEFAULT_PARENT_WINDOW_SECONDS {
+                    return Ok(Some(newer.clone()));
+                }
+            }
+            newer_started_at = Some(started_at);
+        }
+        Ok(None)
+    }
+
+    /// Messages of one chat in send order, optionally from `since` (RFC3339) onward.
+    ///
+    /// Timestamps are stored as RFC3339 text, which sorts and compares lexicographically in the
+    /// same order as the instants it encodes, so the range filter needs no conversion.
+    pub fn messages_for_transcript(
+        &self,
+        chat_id: &str,
+        since: Option<&str>,
+    ) -> Result<Vec<StoredMessage>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT account_hash, chat_id, chat_name, chat_type, message_id,
+                    sender_nickname, timestamp, text, message_type
+             FROM messages
+             WHERE chat_id = ?1 AND (?2 IS NULL OR timestamp >= ?2)
+             ORDER BY timestamp, message_id",
+            )
+            .map_err(Error::Sql)?;
+        let rows = stmt
+            .query_map(params![chat_id, since], StoredMessage::from_row)
             .map_err(Error::Sql)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Error::Sql)?;

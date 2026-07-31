@@ -96,6 +96,12 @@ pub fn photo_thumb_stem(log_id: i64) -> String {
     sha1_rev(&format!("t{log_id}"))
 }
 
+/// Video cache stem. KakaoTalk stores video bodies as `<sha1_rev("v<logId>")>.vid`
+/// in the same per-chat directory as photos; only the key prefix differs.
+pub fn video_full_stem(log_id: i64) -> String {
+    sha1_rev(&format!("v{log_id}"))
+}
+
 pub fn album_full_stem(log_id: i64, idx: usize) -> String {
     sha1_rev(&format!("p{idx}_{log_id}"))
 }
