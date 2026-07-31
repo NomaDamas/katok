@@ -45,9 +45,7 @@ struct RoomMeta {
     ///
     /// `NTChatRoom.chatName` is NULL for these, so without it the room falls
     /// through to a reconstructed member list and ends up stored under a name
-    /// that appears nowhere in KakaoTalk. On the reference install that
-    /// mislabelled the largest room in the archive: 185,066 messages filed
-    /// under a list of members instead of the name the room actually has.
+    /// that appears nowhere in KakaoTalk.
     open_link_name: Option<String>,
 }
 
@@ -319,10 +317,8 @@ fn load_users(conn: &Connection) -> Result<HashMap<i64, String>> {
 /// message bodies.
 ///
 /// Callers pass the `attachment` column first. A KakaoTalk reply (`type` 26)
-/// stores `src_logId` at the top level of `attachment`, and measurements on a
-/// live install found 6891 of 6891 replies shaped that way with **zero** in
-/// `supplement` — so a reader that consulted only `supplement`, as this one once
-/// did, resolved no replies at all while its unit tests stayed green.
+/// stores `src_logId` at the top level of `attachment`, so a reader that
+/// consults only `supplement` resolves no replies.
 ///
 /// Both columns carry metadata for non-reply reasons too, so this stays
 /// deliberately conservative to avoid synthesizing false reply edges:
@@ -480,9 +476,8 @@ fn read_one(
             format!("type_{msg_type}")
         };
 
-        // `attachment` first: on a real install every reply carries its
-        // `src_logId` there and none carry it in `supplement`, so checking only
-        // the latter found nothing at all.
+        // `attachment` first: KakaoTalk replies carry `src_logId` there, so
+        // checking only `supplement` misses them.
         let reply_to_message_id = reply_parent_log_id(attachment.as_deref())
             .or_else(|| reply_parent_log_id(supplement.as_deref()))
             .filter(|parent| *parent != log_id)

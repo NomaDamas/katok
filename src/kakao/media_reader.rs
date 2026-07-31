@@ -87,22 +87,33 @@ pub fn read_media_frames_from_databases(
     query: &MediaQuery,
 ) -> Result<Vec<MediaFrameInput>> {
     let key = derive::secure_key(user_id, uuid);
-    let mut frames = Vec::new();
-    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
 
     for path in database_files {
         let Ok(conn) = reader::open_database(path, &key) else {
             eprintln!("katok: skipping unreadable KakaoTalk db");
             continue;
         };
-        let rows = read_media_rows(&conn, query)?;
-        for row in rows {
-            for frame in frame_inputs(row) {
-                if seen.insert((frame.log_id, frame.idx)) {
-                    frames.push(frame);
-                }
-            }
-        }
+        rows.extend(read_media_rows(&conn, query)?);
+    }
+
+    // Each database query contributes its newest `limit` rows. Merge those
+    // candidates globally, keep the newest copy of a duplicated log id, enforce
+    // the room-level limit once, then restore chronological output order.
+    rows.sort_by(|left, right| {
+        right
+            .sent_at
+            .cmp(&left.sent_at)
+            .then_with(|| right.log_id.cmp(&left.log_id))
+    });
+    let mut seen = HashSet::new();
+    rows.retain(|row| seen.insert(row.log_id));
+    rows.truncate(query.limit);
+    rows.reverse();
+
+    let mut frames = Vec::new();
+    for row in rows {
+        frames.extend(frame_inputs(row));
     }
     Ok(frames)
 }
@@ -148,10 +159,14 @@ fn read_media_rows(conn: &rusqlite::Connection, query: &MediaQuery) -> Result<Ve
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT logId, authorId, type, sentAt, attachment
-                 FROM NTChatMessage
-                 WHERE chatId = ?1 AND type IN ({types})
-                 ORDER BY sentAt ASC, logId ASC
-                 LIMIT ?2"
+                 FROM (
+                    SELECT logId, authorId, type, sentAt, attachment
+                    FROM NTChatMessage
+                    WHERE chatId = ?1 AND type IN ({types})
+                    ORDER BY sentAt DESC, logId DESC
+                    LIMIT ?2
+                 )
+                 ORDER BY sentAt ASC, logId ASC"
             ))
             .map_err(crate::Error::Sql)?;
         let rows = stmt
@@ -460,5 +475,40 @@ mod tests {
         };
 
         assert_eq!(frame_inputs(row)[0].full_ext, ".img");
+    }
+
+    #[test]
+    fn limited_room_query_keeps_the_newest_messages_in_chronological_order() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open sqlite");
+        conn.execute_batch(
+            "CREATE TABLE NTChatMessage (
+                chatId INTEGER NOT NULL,
+                logId INTEGER NOT NULL,
+                authorId INTEGER NOT NULL,
+                type INTEGER NOT NULL,
+                sentAt REAL NOT NULL,
+                attachment TEXT
+            );
+            INSERT INTO NTChatMessage VALUES
+                (7, 1, 1, 18, 100, '{}'),
+                (7, 2, 1, 18, 200, '{}'),
+                (7, 3, 1, 18, 300, '{}');",
+        )
+        .expect("seed rows");
+        let query = MediaQuery {
+            chat_id: 7,
+            log_id: None,
+            limit: 2,
+            kinds: vec![MediaKind::File],
+        };
+
+        let rows = read_media_rows(&conn, &query).expect("read rows");
+        let ids: Vec<i64> = rows.into_iter().map(|row| row.log_id).collect();
+
+        assert_eq!(
+            ids,
+            vec![2, 3],
+            "a bounded backfill must prioritize the newest, still-fetchable attachments"
+        );
     }
 }

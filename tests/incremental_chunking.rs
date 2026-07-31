@@ -2207,6 +2207,44 @@ fn reconciliation_deletes_inside_the_source_window_and_never_outside_it() {
     );
 }
 
+#[test]
+fn reconciliation_never_uses_one_accounts_coverage_to_delete_another_accounts_rows() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = Archive::open(&dir.path().join("archive.sqlite3")).expect("open archive");
+    let at = chrono::Utc::now();
+
+    let mut seeded = Vec::new();
+    for (account, prefix) in [("acct-a", "a"), ("acct-b", "b")] {
+        for (idx, hours) in [0_i64, 2].into_iter().enumerate() {
+            let mut message = raw(
+                "shared-chat",
+                &format!("{prefix}{idx}"),
+                "Alice",
+                at + chrono::Duration::hours(hours),
+                "합성 메시지",
+                None,
+            );
+            message.account_hash = account.to_string();
+            seeded.push(message);
+        }
+    }
+    archive.sync_messages(&seeded).expect("seed");
+
+    let source: Vec<RawMessage> = seeded
+        .iter()
+        .filter(|message| message.account_hash == "acct-a")
+        .cloned()
+        .collect();
+    let doomed = archive
+        .reconcile_deletions(&source, false)
+        .expect("preview");
+
+    assert!(
+        doomed.is_empty(),
+        "coverage from acct-a must not reconcile the unreported acct-b database: {doomed:?}"
+    );
+}
+
 /// A real deletion round-trip: the message goes from the archive, its chunk, and
 /// the search index, and the surrounding history does not.
 ///

@@ -533,3 +533,96 @@ fn cli_sync_json_exposes_touched_chats_only_with_flag() {
         "quiet re-sync must still expose touched_chats when flagged"
     );
 }
+
+#[test]
+fn cli_prune_deleted_rebuilds_before_the_later_edit_floor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fixture = dir.path().join("prune.jsonl");
+    let data_dir = dir.path().join("data");
+    let row = |id: &str, timestamp: &str, text: &str| {
+        format!(
+            "{{\"account_hash\":\"acct-x\",\"chat_id\":\"chat-prune\",\"chat_name\":\"Synthetic\",\
+             \"chat_type\":\"group\",\"message_id\":\"{id}\",\"sender_id\":\"u1\",\
+             \"sender_nickname\":\"tester\",\"timestamp\":\"{timestamp}\",\"text\":\"{text}\",\
+             \"message_type\":\"text\",\"reply_to_message_id\":null}}\n"
+        )
+    };
+
+    let initial = [
+        row("m0", "2026-01-01T00:00:00Z", "앞 문장"),
+        row("m1", "2026-01-01T00:00:10Z", "지워질 검색어"),
+        row("m2", "2026-01-01T00:10:00Z", "뒤 문장"),
+        row("m3", "2026-01-01T00:10:10Z", "수정 전"),
+    ]
+    .concat();
+    std::fs::write(&fixture, initial).expect("write initial fixture");
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "sync",
+            "--source",
+            "fixture",
+            fixture.to_str().expect("utf8 path"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let updated = [
+        row("m0", "2026-01-01T00:00:00Z", "앞 문장"),
+        row("m2", "2026-01-01T00:10:00Z", "뒤 문장"),
+        row("m3", "2026-01-01T00:10:10Z", "수정 후"),
+    ]
+    .concat();
+    std::fs::write(&fixture, updated).expect("write updated fixture");
+
+    let prune = Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "sync",
+            "--source",
+            "fixture",
+            fixture.to_str().expect("utf8 path"),
+            "--prune-deleted",
+            "--json",
+        ])
+        .output()
+        .expect("run prune sync");
+    assert!(
+        prune.status.success(),
+        "prune sync failed: {}",
+        String::from_utf8_lossy(&prune.stderr)
+    );
+    let prune_json: serde_json::Value =
+        serde_json::from_slice(&prune.stdout).expect("parse prune output");
+    assert_eq!(
+        prune_json["total_messages"], 3,
+        "the report and freshness count must reflect applied deletions"
+    );
+
+    let search = Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "search",
+            "keyword",
+            "지워질 검색어",
+            "--json",
+        ])
+        .output()
+        .expect("search after prune");
+    assert!(search.status.success());
+    let hits: serde_json::Value =
+        serde_json::from_slice(&search.stdout).expect("parse search output");
+    assert_eq!(
+        hits.as_array().map(Vec::len),
+        Some(0),
+        "deleted text must leave chunks and keyword search even when the chat also has a later edit"
+    );
+}

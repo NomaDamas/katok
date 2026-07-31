@@ -5,16 +5,21 @@
 //! KakaoTalk database, so the archive stays the single source the rest of the crate agrees on —
 //! run `katok sync` first if the tail matters.
 
-use crate::{archive::Archive, Error, Result};
+use crate::{archive::Archive, Result};
 use serde::Serialize;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A message whose body is a KakaoTalk system feed (joins, leaves, invites) rather than
 /// something a person typed.
 ///
 /// The body of such a message is a JSON object carrying one of the membership keys. Anything
 /// that is not parseable JSON, or is JSON without those keys, is a real message.
-pub fn is_feed(text: &str) -> bool {
+pub fn is_feed(message_type: &str, text: &str) -> bool {
+    if message_type != "type_0" {
+        return false;
+    }
     let trimmed = text.trim_start();
     if !trimmed.starts_with('{') {
         return false;
@@ -66,7 +71,7 @@ pub fn export_transcript(
         if !message.chat_name.is_empty() {
             chat_name = message.chat_name.clone();
         }
-        if is_feed(&message.text) {
+        if is_feed(&message.message_type, &message.text) {
             feed_skipped += 1;
             continue;
         }
@@ -158,12 +163,34 @@ fn sanitize(value: &str) -> String {
 /// Write through a temporary file so a failed or interrupted write cannot leave a partial
 /// transcript where a complete one used to be.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("md.tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path).map_err(|err| {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("transcript");
+    let tmp = path.with_file_name(format!(".{filename}.tmp-{}-{nonce}", std::process::id()));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
-        Error::Io(err)
-    })
+    }
+    result
 }
 
 #[cfg(test)]
@@ -172,13 +199,41 @@ mod tests {
 
     #[test]
     fn membership_json_is_a_feed_but_ordinary_text_is_not() {
-        assert!(is_feed(r#"{"feedType":4,"member":{"nickName":"부리"}}"#));
-        assert!(is_feed(r#"  {"leaver":{"userId":1}}"#));
-        assert!(!is_feed("오늘 회의 몇 시야?"));
-        assert!(!is_feed(""));
+        assert!(is_feed(
+            "type_0",
+            r#"{"feedType":4,"member":{"nickName":"synthetic"}}"#
+        ));
+        assert!(is_feed("type_0", r#"  {"leaver":{"userId":1}}"#));
+        assert!(!is_feed("text", r#"{"member":"ordinary JSON"}"#));
+        assert!(!is_feed("text", "오늘 회의 몇 시야?"));
+        assert!(!is_feed("type_0", ""));
         // JSON the user actually typed, with none of the membership keys.
-        assert!(!is_feed(r#"{"note":"이건 그냥 내가 보낸 JSON"}"#));
+        assert!(!is_feed("type_0", r#"{"note":"이건 그냥 내가 보낸 JSON"}"#));
         // Looks like it starts a feed but does not parse.
-        assert!(!is_feed("{feedType"));
+        assert!(!is_feed("type_0", "{feedType"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn predictable_legacy_temp_symlink_cannot_redirect_transcript_bytes() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output = dir.path().join("transcript.md");
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, b"sentinel").expect("seed victim");
+        symlink(&victim, output.with_extension("md.tmp")).expect("plant legacy temp symlink");
+
+        write_atomically(&output, b"private transcript").expect("atomic write");
+
+        assert_eq!(
+            std::fs::read(&victim).expect("read victim"),
+            b"sentinel",
+            "a predictable temporary path must not redirect transcript bytes"
+        );
+        assert_eq!(
+            std::fs::read(output).expect("read output"),
+            b"private transcript"
+        );
     }
 }

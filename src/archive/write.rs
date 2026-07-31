@@ -505,6 +505,11 @@ impl Archive {
         self.count_rows("chunks")
     }
 
+    /// Number of message rows currently stored in the archive.
+    pub fn message_count(&self) -> Result<usize> {
+        self.count_rows("messages")
+    }
+
     /// The settings and chunker version the stored chunks were built with, if recorded.
     pub fn stored_chunk_settings(&self) -> Result<Option<(i64, i64, i64)>> {
         self.conn
@@ -624,12 +629,12 @@ impl Archive {
     ) -> Result<Vec<DeletedMessage>> {
         use std::collections::{HashMap, HashSet};
 
-        let mut spans: HashMap<&str, (String, String)> = HashMap::new();
-        let mut present: HashSet<(&str, &str)> = HashSet::new();
+        let mut spans: HashMap<(&str, &str), (String, String)> = HashMap::new();
+        let mut present: HashSet<(&str, &str, &str)> = HashSet::new();
         for message in source {
             let ts = message.timestamp.to_rfc3339();
             spans
-                .entry(message.chat_id.as_str())
+                .entry((message.account_hash.as_str(), message.chat_id.as_str()))
                 .and_modify(|(oldest, newest)| {
                     if ts < *oldest {
                         oldest.clone_from(&ts);
@@ -639,27 +644,33 @@ impl Archive {
                     }
                 })
                 .or_insert_with(|| (ts.clone(), ts.clone()));
-            present.insert((message.chat_id.as_str(), message.message_id.as_str()));
+            present.insert((
+                message.account_hash.as_str(),
+                message.chat_id.as_str(),
+                message.message_id.as_str(),
+            ));
         }
 
         let mut doomed = Vec::new();
-        for (chat_id, (oldest, newest)) in &spans {
+        for ((account_hash, chat_id), (oldest, newest)) in &spans {
             let mut stmt = self
                 .conn
                 .prepare_cached(
                     "SELECT message_id FROM messages
-                     WHERE chat_id = ?1 AND timestamp >= ?2 AND timestamp <= ?3",
+                     WHERE account_hash = ?1 AND chat_id = ?2
+                       AND timestamp >= ?3 AND timestamp <= ?4",
                 )
                 .map_err(Error::Sql)?;
             let rows = stmt
-                .query_map(params![chat_id, oldest, newest], |row| {
+                .query_map(params![account_hash, chat_id, oldest, newest], |row| {
                     row.get::<_, String>(0)
                 })
                 .map_err(Error::Sql)?;
             for row in rows {
                 let message_id = row.map_err(Error::Sql)?;
-                if !present.contains(&(chat_id, message_id.as_str())) {
+                if !present.contains(&(account_hash, chat_id, message_id.as_str())) {
                     doomed.push(DeletedMessage {
+                        account_hash: (*account_hash).to_string(),
                         chat_id: (*chat_id).to_string(),
                         message_id,
                     });
@@ -671,8 +682,9 @@ impl Archive {
             for victim in &doomed {
                 self.conn
                     .execute(
-                        "DELETE FROM messages WHERE chat_id = ?1 AND message_id = ?2",
-                        params![victim.chat_id, victim.message_id],
+                        "DELETE FROM messages
+                         WHERE account_hash = ?1 AND chat_id = ?2 AND message_id = ?3",
+                        params![victim.account_hash, victim.chat_id, victim.message_id],
                     )
                     .map_err(Error::Sql)?;
             }

@@ -112,7 +112,7 @@ pub(crate) enum Commands {
     // of this source is not permission or support to use it. Anyone who
     // re-enables it is solely responsible for compliance, account restrictions,
     // and every message sent; the project provides no support or warranty.
-    #[cfg(any())]
+    #[cfg(all(target_os = "macos", feature = "private-send"))]
     Send {
         /// Title of the chat as the chat list shows it. Note the self-chat window is titled
         /// with your own nickname, not "나와의 채팅".

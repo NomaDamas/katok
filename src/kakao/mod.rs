@@ -7,7 +7,7 @@
 //! ids, timestamps, and status are ever emitted.
 
 pub mod auth;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "private-send"))]
 pub mod ax_send;
 mod bplist;
 pub mod derive;
@@ -16,7 +16,7 @@ pub mod media_paths;
 pub mod media_reader;
 pub mod media_resolver;
 pub mod reader;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "private-send"))]
 pub mod send_curtain;
 
 use std::path::PathBuf;

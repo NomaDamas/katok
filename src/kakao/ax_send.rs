@@ -12,19 +12,13 @@
 //!
 //! **Writing the compose box IS sending.** Setting `AXValue` on it does not
 //! stage text for a person to review — KakaoTalk delivers the message on the
-//! spot, measured with a single-line body and no keystroke of any kind. The
-//! `Enter` below is therefore belt-and-braces, not the trigger. A `--draft`
-//! mode was built on the opposite assumption, reported `sent: false`, and put
-//! two messages into real conversations before the archive showed what had
-//! actually happened; it was removed rather than repaired, because any "write
-//! but do not send" feature has to be proven against the app before it is
-//! offered. Pasting via the clipboard without pressing Enter is the untried
-//! candidate, and it needs the screen.
+//! spot. The `Enter` below is therefore belt-and-braces, not the trigger. A
+//! draft mode cannot use this mechanism because writing the value has already
+//! crossed the send boundary.
 //!
-//! Scope: the target chat window must already be open. Locating an arbitrary room means either
-//! crawling the chat list or driving the search field, and both are slow enough (~20s, dominated
-//! by per-node AX round trips) that the caller is better off opening the room once and keeping
-//! it open.
+//! Scope: the target chat window should already be open. Locating an arbitrary
+//! room requires crawling the chat list or driving the search field, both of
+//! which are dominated by per-node AX round trips.
 //!
 //! # Colliding with the user
 //!
@@ -372,8 +366,7 @@ fn wait_for_user_idle(policy: FocusPolicy) -> Result<(), SendError> {
 ///
 /// The obvious route — `AXFocusedApplication` on the system-wide element — is
 /// not usable here: from a plain CLI process it returns `kAXErrorCannotComplete`
-/// (-25204) every time, measured, even with accessibility permission granted.
-/// Per-application queries are unaffected.
+/// (-25204). Per-application queries are unaffected.
 fn app_is_frontmost(pid: i32) -> bool {
     let app = AxRef(unsafe { AXUIElementCreateApplication(pid) });
     let Some(raw) = copy_attr(app.as_raw(), ATTR_FRONTMOST) else {
@@ -807,10 +800,8 @@ fn press_key(pid: i32, key: u16, flags: CGEventFlags) -> Result<(), SendError> {
 
 /// Which room to act on.
 ///
-/// A display name is not an identifier: on the reference install four names are
-/// shared by two rooms each, and one archive name covers nine. Picking the first
-/// row that matches therefore sends to whichever of them happens to sit higher,
-/// and a message delivered to the wrong person cannot be taken back — so an
+/// A display name is not an identifier and can be shared by multiple rooms.
+/// Picking the first matching row can therefore target the wrong room, so an
 /// ambiguous name is refused rather than guessed at.
 ///
 /// `last_activity` is the chat list's own last-message column for the intended
@@ -849,10 +840,8 @@ fn choose_row<'a>(rows: &'a [AxRef], target: &RoomTarget) -> Result<&'a AxRef, S
             // Same name, more than one room. The last-message column is the only
             // thing on screen that tells them apart.
             // Rows come most-recent-first, so the archive's recency ranking is
-            // the index. Deliberately not an exact last-message-time compare:
-            // that was tried and it goes stale within a minute in a room
-            // somebody is actively typing in, which refuses the very sends most
-            // likely to be wanted.
+            // the index. Deliberately not an exact last-message-time compare,
+            // because the archive timestamp can be stale while a room is active.
             if let Some(rank) = target.rank {
                 if let Some(hit) = named.get(rank) {
                     return Ok(hit);
@@ -868,11 +857,9 @@ fn choose_row<'a>(rows: &'a [AxRef], target: &RoomTarget) -> Result<&'a AxRef, S
 
 /// A room title reduced to its members, order-independent.
 ///
-/// KakaoTalk titles a room with no name by listing its members, and it does not
-/// use the same order the archive does — the archive stores
-/// `"도현, 나윤"` for the room the chat list shows as `"나윤, 도현"`.
-/// So a name taken from a search result never matches the row it came from, and
-/// every unnamed group room is unreachable by `--room`.
+/// KakaoTalk titles a room with no name by listing its members, and it may not
+/// use the same order as the archive. A string comparison therefore fails even
+/// when both sides name the same member set.
 ///
 /// Comparing the sorted member set fixes that without having to guess
 /// KakaoTalk's ordering rule. A room with a real name has no members to split
@@ -1029,7 +1016,7 @@ fn find_confirm_button(sheet: AXUIElementRef) -> Option<AxRef> {
 ///
 /// Unlike text, this cannot run in the background: Cmd+V is a menu key equivalent, and an
 /// inactive app has no key window for `paste:` to reach, so posting it to the pid alone is
-/// silently dropped (measured). KakaoTalk therefore comes forward — but only during a gap in
+/// silently dropped. KakaoTalk therefore comes forward — but only during a gap in
 /// the user's own input, only after its frontmost state is confirmed, and with both the
 /// previous app and the clipboard put back afterwards.
 pub fn send_image_to_open_window(
@@ -1120,7 +1107,7 @@ pub fn send_image_to_open_window(
             (Some(b), Some(now)) if now > b => return Ok(()),
             // Row counts unavailable on this window; fall back to the paste having been
             // consumed, and say so rather than pretending the send was confirmed.
-            (None, _) | (_, None) => {
+            (None, _) | (_, None)
                 if attr_string(
                     compose_box(window.as_raw())
                         .as_ref()
@@ -1129,10 +1116,9 @@ pub fn send_image_to_open_window(
                     ATTR_VALUE,
                 )
                 .unwrap_or_default()
-                .is_empty()
-                {
-                    return Ok(());
-                }
+                .is_empty() =>
+            {
+                return Ok(());
             }
             _ => {}
         }
@@ -1192,7 +1178,7 @@ fn open_titles(windows: &[AxRef]) -> String {
 /// picks the wrong window whenever a chat is open. The reliable difference is the compose box:
 /// every chat window has one, the main window does not.
 fn main_window(windows: &[AxRef]) -> Option<&AxRef> {
-    // Structural guesses all failed on real data: a chat window also has a table (its
+    // Structural guesses are insufficient: a chat window also has a table (its
     // transcript), a read-only channel window also lacks a compose box, and a chat window also
     // has a text field (search-within-chat). So score candidates by the property actually
     // needed — how many of their rows yield a room name — and take the best. A transcript
@@ -1237,9 +1223,9 @@ fn chat_list_table(windows: &[AxRef]) -> Option<AxRef> {
 
 /// Room name of a chat-list row: `AXRow > AXCell > first AXStaticText`.
 ///
-/// Kept deliberately shallow. A generic descendant crawl costs ~160 node visits per row, which
-/// is what makes a full-list scan take ~20s (see references/performance.md); this reads a
-/// handful of attributes and stops at the first static text.
+/// Kept deliberately shallow. A generic descendant crawl performs many AX
+/// round trips per row; this reads a handful of attributes and stops at the
+/// first static text.
 fn row_room_name(row: AXUIElementRef) -> Option<String> {
     let cell = child_elements(row, ATTR_CHILDREN)
         .into_iter()
@@ -1335,10 +1321,9 @@ fn frame_of(el: AXUIElementRef) -> Option<CGRect> {
 
 /// Open a chat-list row by double-clicking it.
 ///
-/// Rows advertise only `AXShowDefaultUI`/`AXShowAlternateUI` — they ignore `AXPress` and they
-/// ignore Enter even when selected and focused with the app frontmost (both measured). A real
-/// double-click is the only thing KakaoTalk acts on, which means the row has to be visible on
-/// screen and the app has to be frontmost, so this necessarily takes focus for a moment.
+/// Rows advertise only `AXShowDefaultUI`/`AXShowAlternateUI` and ignore both
+/// `AXPress` and Enter. A real double-click is the supported route, which means
+/// the row has to be visible and the app has to be frontmost.
 ///
 /// It refuses to click unless KakaoTalk is confirmed frontmost — a click posted otherwise would
 /// land in whatever *is* frontmost — and puts the pointer back where it was. Taking focus and
@@ -1365,10 +1350,8 @@ fn open_row_by_click(
     // And re-read the row itself. The chat list reorders the moment any room
     // receives a message, and an `AXRow` is positional — so between picking the
     // row and clicking its coordinates, that position can already belong to a
-    // different conversation. Measured while dogfooding: aiming at one room
-    // opened another. Sending is protected downstream by the window-title check,
-    // but opening the wrong person's chat is its own harm, so this fails and
-    // lets the caller retry against a settled list.
+    // different conversation. Opening the wrong chat is its own harm, so this
+    // fails and lets the caller retry against a settled list.
     if !row_room_name(row).is_some_and(|name| room_matches(&name, &target.name)) {
         return Err(SendError::ChatListMoved {
             room: target.name.clone(),
@@ -1659,12 +1642,10 @@ fn resolve_window(
         // Search first, even though scanning the visible rows is cheaper.
         //
         // A row is opened by double-clicking its screen coordinates, and the
-        // chat list reorders the instant any of nearly three hundred rooms
-        // receives a message — so between reading a row's position and clicking
-        // it, that position can belong to someone else. Measured: aiming at one
-        // room opened another. Filtering the list down to the single matching
-        // row removes the race rather than narrowing it, because there is
-        // nothing left to reorder.
+        // chat list can reorder between reading a row's position and clicking
+        // it, so that position may already belong to another room. Filtering
+        // down to the single matching row removes the race rather than merely
+        // narrowing it.
         let outcome = match attempt % 3 {
             0 => open_room_via_search(app, &windows, target, pid),
             1 => open_room_from_chat_list(app, &windows, target, RECENT_ROWS, pid),
@@ -1854,9 +1835,8 @@ fn put_text_on_clipboard(text: &str) -> Result<(), SendError> {
 ///
 /// It goes in by paste, not by `AXValue`. Writing that attribute *is* sending:
 /// KakaoTalk delivers the message the moment the value changes, with no
-/// keystroke involved — an earlier draft mode assumed otherwise, reported
-/// `sent: false`, and put two messages into real conversations. Paste inserts
-/// text and nothing more, so the box fills and stays filled.
+/// keystroke involved. Paste inserts text and nothing more, so the box fills
+/// and stays filled.
 ///
 /// The cost is the screen: Cmd+V is a menu key equivalent, so KakaoTalk has to
 /// be frontmost, which is what the curtain is for. The clipboard is saved and
@@ -1964,44 +1944,38 @@ mod room_matching_tests {
 
     #[test]
     fn member_order_does_not_decide_identity() {
-        // The archive stores one member order, the chat list shows another, so a
-        // name comparison decides identity by member set rather than by string.
-        // The names here are stand-ins; only the reordering is what was observed.
-        assert!(room_matches("나윤, 도현", "도현, 나윤"));
-        assert!(room_matches("도현, 나윤", "도현, 나윤"));
+        assert!(room_matches("Alpha, Beta", "Beta, Alpha"));
+        assert!(room_matches("Beta, Alpha", "Beta, Alpha"));
     }
 
     #[test]
     fn different_members_are_still_different_rooms() {
-        assert!(!room_matches("나윤, 지우", "도현, 나윤"));
-        assert!(!room_matches("나윤", "도현, 나윤"));
+        assert!(!room_matches("Alpha, Gamma", "Beta, Alpha"));
+        assert!(!room_matches("Alpha", "Beta, Alpha"));
     }
 
     #[test]
     fn a_named_room_compares_as_itself() {
-        assert!(room_matches("주말 등산 모임", "주말 등산 모임"));
-        assert!(!room_matches("주말 등산 모임", "주말 등산"));
-        // A real name that happens to contain commas splits the same way on
-        // both sides, so it still matches itself and nothing else.
-        let name = "양자BlockQ(교육,보안,컴퓨팅)";
+        assert!(room_matches("Synthetic Club", "Synthetic Club"));
+        assert!(!room_matches("Synthetic Club", "Synthetic"));
+        // A named room that contains commas splits the same way on both sides.
+        let name = "Synthetic(education,security,compute)";
         assert!(room_matches(name, name));
-        assert!(!room_matches("양자BlockQ(교육,보안)", name));
+        assert!(!room_matches("Synthetic(education,security)", name));
     }
 
     #[test]
     fn whitespace_around_members_is_ignored() {
         assert_eq!(
-            room_member_key("  나윤 ,도현  "),
-            vec!["나윤".to_string(), "도현".to_string()]
+            room_member_key("  Alpha ,Beta  "),
+            vec!["Alpha".to_string(), "Beta".to_string()]
         );
-        assert!(room_matches("나윤 , 도현", "도현,나윤"));
+        assert!(room_matches("Alpha , Beta", "Beta,Alpha"));
     }
 
     #[test]
     fn the_search_query_is_one_distinctive_member() {
-        // Typing the joined title finds nothing when the order differs, so the
-        // query is a single member and the filtering happens on the results.
-        assert_eq!(search_query_for("나윤, 도현"), "나윤");
-        assert_eq!(search_query_for("주말 등산 모임"), "주말 등산 모임");
+        assert_eq!(search_query_for("Alpha, Beta"), "Alpha");
+        assert_eq!(search_query_for("Synthetic Club"), "Synthetic Club");
     }
 }

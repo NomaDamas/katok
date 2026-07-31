@@ -86,7 +86,7 @@ pub(crate) fn run(
             json,
         } => run_transcript(&chat, since.as_deref(), out, json, &archive_path, &data_dir),
         Commands::WipeIndex { yes, json } => run_wipe_index(yes, json, &semantic_dir),
-        #[cfg(any())]
+        #[cfg(all(target_os = "macos", feature = "private-send"))]
         Commands::Send {
             room,
             chat,
@@ -121,7 +121,7 @@ pub(crate) fn run(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(any())]
+#[cfg(all(target_os = "macos", feature = "private-send"))]
 fn run_send(
     room: Option<String>,
     chat: Option<String>,
@@ -386,11 +386,18 @@ fn run_sync(
                     .map(|d| d.chat_id.as_str())
                     .collect::<std::collections::BTreeSet<_>>()
                 {
-                    if !report.touched_chats.iter().any(|c| c.chat_id == chat_id) {
-                        // Empty means "no floor", so the chat rebuilds whole.
-                        // A deletion has no surviving row to anchor a tail to,
-                        // and it is rare enough that the wider scope is cheap
-                        // next to getting it wrong.
+                    if let Some(touched) = report
+                        .touched_chats
+                        .iter_mut()
+                        .find(|candidate| candidate.chat_id == chat_id)
+                    {
+                        // A later edit may already have put this chat in the
+                        // report with a tail floor after the deleted row. A
+                        // deletion has no surviving row that can safely anchor
+                        // a cut, so widen that existing touch to the whole chat.
+                        touched.earliest_changed_timestamp.clear();
+                        touched.earliest_changed_message_id.clear();
+                    } else {
                         report.touched_chats.push(katok::types::TouchedChat {
                             chat_id: chat_id.to_string(),
                             earliest_changed_timestamp: String::new(),
@@ -398,6 +405,8 @@ fn run_sync(
                         });
                     }
                 }
+                report.rebuilt_chats = report.touched_chats.len();
+                report.total_messages = archive.message_count().context("count messages")?;
             }
             doomed
         } else {

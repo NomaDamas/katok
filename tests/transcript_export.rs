@@ -4,6 +4,16 @@
 use katok::{archive::Archive, transcript::export_transcript, types::RawMessage};
 
 fn message(id: &str, chat: &str, seconds: i64, text: &str) -> RawMessage {
+    message_of_type(id, chat, seconds, text, "text")
+}
+
+fn message_of_type(
+    id: &str,
+    chat: &str,
+    seconds: i64,
+    text: &str,
+    message_type: &str,
+) -> RawMessage {
     let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
         .expect("base timestamp")
         .with_timezone(&chrono::Utc);
@@ -17,7 +27,7 @@ fn message(id: &str, chat: &str, seconds: i64, text: &str) -> RawMessage {
         sender_nickname: "보글이".to_string(),
         timestamp: base + chrono::Duration::seconds(seconds),
         text: text.to_string(),
-        message_type: "text".to_string(),
+        message_type: message_type.to_string(),
         reply_to_message_id: None,
     }
 }
@@ -100,11 +110,12 @@ fn a_later_range_lands_in_its_own_file() {
 fn system_feed_messages_are_left_out_of_the_transcript_but_stay_in_the_archive() {
     let messages = vec![
         message("m001", "A", 0, "사람이 쓴 말"),
-        message(
+        message_of_type(
             "m002",
             "A",
             30,
             r#"{"feedType":4,"member":{"nickName":"부리"}}"#,
+            "type_0",
         ),
         message("m003", "A", 60, "또 사람이 쓴 말"),
     ];
@@ -127,4 +138,33 @@ fn system_feed_messages_are_left_out_of_the_transcript_but_stay_in_the_archive()
         .messages_for_transcript("A", None)
         .expect("read archive");
     assert_eq!(stored.len(), 3);
+}
+
+#[test]
+fn user_authored_json_with_membership_keys_stays_in_the_transcript() {
+    let messages = vec![
+        message(
+            "m001",
+            "A",
+            0,
+            r#"{"member":"ordinary user-authored JSON"}"#,
+        ),
+        message_of_type(
+            "m002",
+            "A",
+            30,
+            r#"{"feedType":4,"member":{"nickName":"synthetic"}}"#,
+            "type_0",
+        ),
+    ];
+    let (dir, archive) = archive_with(&messages);
+    let report = export_transcript(&archive, "A", None, &dir.path().join("out")).expect("export");
+
+    assert_eq!(report.messages, 1);
+    assert_eq!(report.feed_skipped, 1);
+    let body = std::fs::read_to_string(report.path.expect("path")).expect("read transcript");
+    assert!(
+        body.contains("ordinary user-authored JSON"),
+        "a text message must not be classified as a system feed from its body alone"
+    );
 }
