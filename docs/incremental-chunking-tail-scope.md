@@ -4,7 +4,10 @@ This document is the single source of truth for **where a per-chat chunk rebuild
 
 ## Problem
 
-`rebuild_chunks_for_chats` today re-reads a touched chat's entire message history through `raw_messages_for_chats` and re-chunks it from the first message. For the largest active room (178,012 messages) that is about 4.95s of work every time the room receives a single message, because the cost tracks room size rather than the number of new messages. We want the cost to track new messages instead.
+`rebuild_chunks_for_chats` used to re-read a touched chat's entire message
+history through `raw_messages_for_chats` and re-chunk it from the first message.
+That makes append cost track room size rather than the number of new messages.
+We want the cost to track the changed tail instead.
 
 ## The two invariants the rule stands on
 
@@ -42,7 +45,10 @@ A mid-history in-place update (for example a `sender_nickname` change on an old 
 
 The rule needs `e` per touched chat, which `sync_messages` does not report yet: it currently reports only `touched_chats` (chat ids), not where in each chat the change landed. The implementation step will extend the sync report to also carry, per touched chat, the smallest changed key `e` (its earliest inserted-or-updated message's `(timestamp, message_id)`), and `rebuild_chunks_for_chats` will resolve `P` from the stored chunk gaps of that chat. The existing full-rebuild triggers (first sync, gap-settings change, chunker-version bump) are unaffected and still take the full path.
 
-`rebuild_parent_refs` (the reply-edge and cross-chunk reference pass) still scans the whole archive. Step-1 measurements put that within the small-room floor (about 220ms) while the chunking loop dominated the large-room cost (about 4.95s), so tail-scoping the chunking loop captures the win; scoping the reference pass is handled separately — the fact that it *can* be scoped, and the rule for doing so, are settled in "The reply/parent-ref pass is chat-local too" below.
+`rebuild_parent_refs` (the reply-edge and cross-chunk reference pass) was also
+archive-wide. Scoping that pass is handled separately — the fact that it can be
+scoped, and the rule for doing so, are settled in "The reply/parent-ref pass is
+chat-local too" below.
 
 ### Where the implementation actually cuts
 
@@ -60,11 +66,9 @@ states the full change key `(timestamp, message_id)`, but the cut resolver does
 not read it: a gap-derived `P` is separated from its predecessor by more than
 300s, so `started_at >= P` needs no message-id tiebreak.
 
-## Residual cost after tail scope (step-4 measurement)
+## Residual cost after tail scope
 
-Tail-scoping drops the large-room `rebuild_chunks` contribution from ~5s to
-~270ms on the real archive (178k-message room, one new message). The residual is
-**not** the re-chunk loop. It breaks down as:
+After the tail cut, the remaining archive-size work came from:
 
 1. **Archive-wide reply / parent-ref pass** (`rebuild_reply_and_parent_refs` →
    `rebuild_parent_refs`). Every scoped rebuild deletes and rewrites `reply_edges`
@@ -74,24 +78,11 @@ Tail-scoping drops the large-room `rebuild_chunks` contribution from ~5s to
 2. **No indexes on `chunks`** (`src/archive/schema.rs` creates tables only).
    `tail_rebuild_start` (`WHERE chat_id = ? AND started_at < ? ORDER BY started_at
    DESC`), tail deletes (`WHERE chat_id = ? AND started_at >= ?`), and the ref
-   joins scan and sort the full `chunks` / `chunk_messages` tables. On a ~262k-row
-   archive that is a full scan per statement.
+   joins scan and sort the full `chunks` / `chunk_messages` tables.
 
-Fixing either is a separate plan (indexes and/or scoped ref rebuild). This plan
-only records the split so the residual floor is not mistaken for failed tail scope.
-
-Synthetic check (release, `tests/incremental_chunking.rs::a_large_single_room_...`,
-n=100000, 2026-07-28):
-
-| stage | ms |
-|---|---|
-| whole-chat seed rebuild | 131644 |
-| one-message scoped append | 5231 |
-| `rebuild_reply_and_parent_refs` alone | 5102 |
-
-Speedup scoped vs whole-chat ≈ 25x. Of the 5.2s scoped floor, **5.1s is the
-archive-wide ref pass** — the re-chunk of the last burst is negligible. That is
-why residual scales with archive size even after tail scope.
+The indexes and scoped reference rebuild remove those terms. The synthetic
+large-room test pins the property that a one-message append is much cheaper
+than a whole-chat rebuild without committing any private archive measurement.
 
 ## The reply/parent-ref pass is chat-local too (step-2 determination)
 
@@ -146,7 +137,7 @@ DELETE FROM chunks_fts
     WHERE chat_id = ?1 AND started_at >= COALESCE(?2, ''))
 ```
 
-and cost ~41ms warm on the real archive while removing four rows.
+and walked the whole FTS table even when only a few tail rows were removed.
 
 ### Why no index could fix it
 
@@ -177,17 +168,6 @@ LIST SUBQUERY 1
 ```
 
 SQLite still prints `SCAN` for any fts5 step — it does for a single-row seek too — so the scan-by-name check the other tables use says nothing here. The `=` in the `idxStr` is the evidence, and it is what the test asserts.
-
-### Measured, at two archive sizes
-
-Real-archive copy (405k messages / 262k chunks), largest room, floor set so exactly four chunks are deleted, warm, `BEGIN`/`ROLLBACK` per run:
-
-| archive `chunks_fts` rows | `chunk_id` form | `rowid` form |
-|---|---|---|
-| 262,271 | 43 / 40 / 41 ms | 0 / 1 / 0 ms |
-| 193,857 (other rooms halved) | 28 / 27 / 26 ms | 0 / 1 / 0 ms |
-
-The old form tracks archive size (74% of the rows, 66% of the time); the new one does not move. Decomposed on the same copy, the surviving cost of the new statement is the delete itself (~1ms for four rows) — the archive-proportional term is gone, not merely reduced.
 
 ### The invariant this now rests on
 
