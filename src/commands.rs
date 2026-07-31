@@ -86,7 +86,7 @@ pub(crate) fn run(
             json,
         } => run_transcript(&chat, since.as_deref(), out, json, &archive_path, &data_dir),
         Commands::WipeIndex { yes, json } => run_wipe_index(yes, json, &semantic_dir),
-        #[cfg(target_os = "macos")]
+        #[cfg(any())]
         Commands::Send {
             room,
             chat,
@@ -121,7 +121,7 @@ pub(crate) fn run(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(target_os = "macos")]
+#[cfg(any())]
 fn run_send(
     room: Option<String>,
     chat: Option<String>,

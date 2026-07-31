@@ -107,8 +107,12 @@ pub(crate) enum Commands {
     /// Unlike every other subcommand this writes rather than reads, and it does so by driving
     /// the running app's UI — there is no supported write path into the local archive. The
     /// target window must already be open; KakaoTalk is never brought to the front.
-    #[cfg(target_os = "macos")]
-    #[command(hide = true)]
+    // Private diagnostic entry point, intentionally disabled in public builds.
+    // It drives the KakaoTalk UI and is not a Kakao-approved API. The presence
+    // of this source is not permission or support to use it. Anyone who
+    // re-enables it is solely responsible for compliance, account restrictions,
+    // and every message sent; the project provides no support or warranty.
+    #[cfg(any())]
     Send {
         /// Title of the chat as the chat list shows it. Note the self-chat window is titled
         /// with your own nickname, not "나와의 채팅".
