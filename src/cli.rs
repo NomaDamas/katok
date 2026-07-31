@@ -108,6 +108,7 @@ pub(crate) enum Commands {
     /// the running app's UI — there is no supported write path into the local archive. The
     /// target window must already be open; KakaoTalk is never brought to the front.
     #[cfg(target_os = "macos")]
+    #[command(hide = true)]
     Send {
         /// Title of the chat as the chat list shows it. Note the self-chat window is titled
         /// with your own nickname, not "나와의 채팅".
