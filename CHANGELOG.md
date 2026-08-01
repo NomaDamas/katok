@@ -10,6 +10,8 @@
 - Text, image, and draft modes fail before stdin, archive, Accessibility, or
   KakaoTalk UI access unless `--accept-use-policy` is supplied. Read-only
   listing and non-delivery `--dry-run` remain available without acceptance.
+- `katok send --list-windows` and `--list-rooms` no longer require a dummy
+  `--room` or `--chat` target.
 - `ACCEPTABLE_USE_POLICY.md` and `DISCLAIMER.md` prohibit spam, impersonation,
   account theft, stalking, harassment, post-refusal contact, bulk/repetitive
   sending, privacy violations, and access-control evasion.

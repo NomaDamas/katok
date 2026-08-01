@@ -102,11 +102,11 @@ pub(crate) enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Send a message into an already open KakaoTalk chat window (macOS only).
+    /// Send, stage, or inspect a KakaoTalk chat through its macOS UI.
     ///
     /// Unlike every other subcommand this writes rather than reads, and it does so by driving
-    /// the running app's UI — there is no supported write path into the local archive. The
-    /// target window must already be open; KakaoTalk is never brought to the front.
+    /// the running app's UI — there is no supported write path into the local archive. Opening
+    /// a closed room, staging a draft, or sending an image can bring KakaoTalk forward briefly.
     // This drives the local KakaoTalk UI and is not a Kakao-approved API.
     // Message-affecting modes require an explicit acceptable-use acknowledgement.
     #[cfg(all(target_os = "macos", feature = "private-send"))]
@@ -116,7 +116,10 @@ pub(crate) enum Commands {
         ///
         /// Names are not unique — several rooms can share one. When they do, the send is
         /// refused rather than guessed at; use `--chat` instead.
-        #[arg(long, required_unless_present = "chat")]
+        #[arg(
+            long,
+            required_unless_present_any = ["chat", "list_windows", "list_rooms"]
+        )]
         room: Option<String>,
         /// Address the room by its `chat_id`, as `search` and `chunks` report it.
         ///
@@ -304,4 +307,28 @@ pub(crate) enum PermissionsCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[cfg(all(test, target_os = "macos", feature = "private-send"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_listing_modes_parse_without_target() {
+        for flag in ["--list-windows", "--list-rooms"] {
+            let cli = Cli::try_parse_from(["katok", "send", flag])
+                .unwrap_or_else(|error| panic!("{flag} should not require --room: {error}"));
+
+            assert!(matches!(
+                cli.command,
+                Commands::Send {
+                    list_windows: true,
+                    ..
+                } | Commands::Send {
+                    list_rooms: true,
+                    ..
+                }
+            ));
+        }
+    }
 }
