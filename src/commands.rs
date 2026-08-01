@@ -155,7 +155,7 @@ fn run_send(
     if !dry_run && !accept_use_policy {
         anyhow::bail!(
             "refusing to continue without --accept-use-policy; read \
-             ACCEPTABLE_USE_POLICY.md and DISCLAIMER.md before using message-affecting modes"
+             ACCEPTABLE_USE_POLICY.md and DISCLAIMER.md"
         );
     }
 

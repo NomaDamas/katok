@@ -1,6 +1,6 @@
 ---
 name: katok
-description: Search local KakaoTalk keyword, BM25, and EmbeddingGemma vector indexes through the katok CLI, list rooms, export a room's chunks or a Markdown transcript of what was said over a time range, and extract image and video attachments.
+description: Search local KakaoTalk keyword, BM25, and EmbeddingGemma vector indexes through the katok CLI, list rooms, export chunks or transcripts, extract attachments, and prepare guarded message sends only after explicit user confirmation.
 ---
 
 # katok
@@ -45,6 +45,7 @@ katok media get --chat <chat-id> --kind file --json   # only file attachments (z
 katok media get --chat <chat-id> --out <dir> --no-cdn --json   # local tiers only
 katok media backfill --dry-run --json   # what is still fetchable across every room
 katok media backfill --json             # save it before the presigned links expire
+katok send --chat <chat-id> --dry-run --json
 ```
 
 For synthetic QA only:
@@ -69,6 +70,23 @@ environment variable; setting one is silently ignored and the run writes into th
 7. Use `katok search keyword ...`, `katok search bm25 ...`, and `katok search semantic ...` for discovery.
 8. Use `katok chunk get ...` only for explicit retrieval.
 9. Run `katok doctor --macos-probe --json` only for setup or permission diagnostics, because it may trigger a macOS "access data from other apps" prompt.
+
+## Message Sending Safety
+
+Sending is an irreversible external side effect. Use the dedicated
+[`katok-send`](../katok-send/SKILL.md) skill rules whenever the user explicitly
+asks to send or stage a message.
+
+- Never infer send permission from a search, summary, drafting, or setup request.
+- Never pass `--accept-use-policy` until the user has explicitly confirmed the
+  exact room and final message or image in the current interaction.
+- Run `katok send --chat <chat-id> --dry-run --json` first.
+- Prefer `--chat` over a room name; names are not unique.
+- Do not automate loops, schedules, recipient lists, bulk delivery, or retries.
+- Do not assist spam, impersonation, account theft, post-refusal contact,
+  stalking, harassment, privacy violations, or protection-measure evasion.
+- Read `ACCEPTABLE_USE_POLICY.md` and `DISCLAIMER.md`; Accessibility permission
+  is not Kakao approval.
 
 `--source macos` reads the live macOS KakaoTalk SQLCipher database locally in Rust; the terminal must have Full Disk Access to `~/Library/Containers/com.kakao.KakaoTalkMac/`.
 
@@ -137,7 +155,9 @@ Run it on a schedule if attachments matter. A backfill started after the window 
 
 ## Related Skills
 
-`katok send` is documented separately in `skills/katok-send`. It is the only subcommand that writes, and it does so by driving the running app's UI rather than the local archive.
+`katok send` is documented separately in `skills/katok-send/SKILL.md`. It is the
+only subcommand that writes, and it does so by driving the running official
+KakaoTalk app's UI rather than a Kakao remote private protocol or API.
 
 ## Platform
 
