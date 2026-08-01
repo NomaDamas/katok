@@ -107,11 +107,8 @@ pub(crate) enum Commands {
     /// Unlike every other subcommand this writes rather than reads, and it does so by driving
     /// the running app's UI — there is no supported write path into the local archive. The
     /// target window must already be open; KakaoTalk is never brought to the front.
-    // Private diagnostic entry point, intentionally disabled in public builds.
-    // It drives the KakaoTalk UI and is not a Kakao-approved API. The presence
-    // of this source is not permission or support to use it. Anyone who
-    // re-enables it is solely responsible for compliance, account restrictions,
-    // and every message sent; the project provides no support or warranty.
+    // This drives the local KakaoTalk UI and is not a Kakao-approved API.
+    // Message-affecting modes require an explicit acceptable-use acknowledgement.
     #[cfg(all(target_os = "macos", feature = "private-send"))]
     Send {
         /// Title of the chat as the chat list shows it. Note the self-chat window is titled
@@ -164,6 +161,12 @@ pub(crate) enum Commands {
         /// Seconds to wait for that gap before giving up and sending nothing.
         #[arg(long, default_value_t = 15, conflicts_with = "take_focus_now")]
         focus_wait: u64,
+        /// Confirm that you read and accept ACCEPTABLE_USE_POLICY.md and DISCLAIMER.md.
+        ///
+        /// Required for text, image, and draft modes. It does not legalize spam,
+        /// harassment, impersonation, stalking, or any other prohibited use.
+        #[arg(long)]
+        accept_use_policy: bool,
         #[arg(long)]
         json: bool,
     },

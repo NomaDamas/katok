@@ -18,7 +18,7 @@ exclude = [
 ]
 
 [features]
-default = []
+default = ["private-send"]
 private-send = [
     "dep:core-foundation",
     "dep:core-graphics",

@@ -100,6 +100,7 @@ pub(crate) fn run(
             draft,
             take_focus_now,
             focus_wait,
+            accept_use_policy,
             json,
         } => run_send(
             room,
@@ -114,6 +115,7 @@ pub(crate) fn run(
             draft,
             take_focus_now,
             focus_wait,
+            accept_use_policy,
             json,
             &archive_path,
         ),
@@ -135,6 +137,7 @@ fn run_send(
     draft: bool,
     take_focus_now: bool,
     focus_wait: u64,
+    accept_use_policy: bool,
     json: bool,
     archive_path: &Path,
 ) -> Result<()> {
@@ -148,6 +151,12 @@ fn run_send(
     if list_rooms {
         let rooms = ax_send::chat_list_rooms(limit)?;
         return print_payload(json, &serde_json::json!({ "rooms": rooms }));
+    }
+    if !dry_run && !accept_use_policy {
+        anyhow::bail!(
+            "refusing to continue without --accept-use-policy; read \
+             ACCEPTABLE_USE_POLICY.md and DISCLAIMER.md before using message-affecting modes"
+        );
     }
 
     let allow_open = !no_open;
