@@ -1,8 +1,18 @@
 # katok
 
-`katok`은 Apple Silicon Mac에서 카카오톡 대화를 로컬로 읽고, 키워드 검색과 벡터 검색을 바로 쓸 수 있게 만드는 CLI입니다.
+`katok`은 Apple Silicon Mac에서 카카오톡 대화를 로컬로 읽고, 키워드·벡터
+검색과 사용자가 명시적으로 승인한 메시지 전송을 제공하는 CLI입니다.
 
-카카오톡 대화 내용을 서버로 올리지 않습니다. macOS에 저장된 카카오톡 DB를 읽어 개인 Mac 안에 정규화된 아카이브와 검색 인덱스를 만들고, `katok search ...` 명령으로 필요한 대화를 찾습니다.
+읽기·검색·인덱싱을 위해 카카오톡 대화 내용을 별도의 `katok` 서버로 올리지
+않습니다. macOS에 저장된 카카오톡 DB를 읽어 개인 Mac 안에 정규화된
+아카이브와 검색 인덱스를 만들고, `katok search ...` 명령으로 필요한 대화를
+찾습니다.
+
+`katok send`는 카카오 원격 서버의 비공개 프로토콜이나 비공식 API를 직접
+호출하지 않고, 사용자의 Mac에서 실행 중인 공식 KakaoTalk 앱을 macOS
+Accessibility로 조작합니다. 이는 카카오의 승인이나 이용제한 면제를 의미하지
+않습니다. 실제 사용 전에 [허용 사용 정책](ACCEPTABLE_USE_POLICY.md)과
+[면책 고지](DISCLAIMER.md)를 읽으십시오.
 
 ## 무엇을 해주나
 
@@ -11,6 +21,8 @@
 - 긴 대화는 카카오톡 흐름에 맞게 chunk로 나누고, 5분 안팎의 같은 채팅방 대화는 parent window로 묶어 벡터 검색 품질을 높입니다.
 - 검색 결과는 짧은 snippet과 chunk id만 보여줍니다. 원문 전체는 사용자가 명시적으로 `katok chunk get <chunk-id>`를 실행할 때만 출력합니다.
 - 에이전트는 Vercel Agent Skills/Codex Skills에서 `skills/katok/SKILL.md`를 통해 CLI만 호출하면 됩니다.
+- 명시적인 정책 동의와 macOS Accessibility 권한 아래에서 텍스트·이미지를
+  공식 KakaoTalk 앱 UI로 전달할 수 있습니다.
 
 ## 지원 환경
 
@@ -33,6 +45,13 @@ Cargo:
 
 ```bash
 cargo install katok
+```
+
+기본 설치는 macOS에서 `katok send`를 포함합니다. 검색·아카이브 기능만 필요한
+경우 전송 기능 없이 설치할 수 있습니다.
+
+```bash
+cargo install katok --no-default-features
 ```
 
 Cargo로 설치했는데 `katok: command not found`가 나오면 현재 셸이 Cargo binary 경로를 못 보고 있는 상태입니다.
@@ -70,6 +89,15 @@ katok doctor --macos-probe --json
 ```
 
 이 probe는 macOS가 "katok would like to access data from other apps" 권한 요청을 띄울 수 있습니다. 반복 요청을 줄이려면 `katok permissions macos`로 System Settings를 연 뒤 사용 중인 Terminal/iTerm/Codex 앱이나 설치된 `katok` 실행 파일을 Full Disk Access에 허용하세요.
+
+`katok send`는 별도의 Accessibility 권한이 필요합니다.
+
+```bash
+katok permissions macos --accessibility
+```
+
+Accessibility 권한은 사용자의 로컬 Mac에서 KakaoTalk UI를 조작할 수 있게 할
+뿐, 카카오가 자동 전송을 승인했다는 뜻은 아닙니다.
 
 권한 설정을 처음부터 안내받으려면:
 
@@ -223,6 +251,42 @@ katok sync --source fixture tests/fixtures/kakao/replies.jsonl --json
 
 합성 데이터로 실행할 때는 `--data-dir <임시경로>` 플래그로 반드시 격리하세요. `KATOK_DATA_DIR` 환경변수는 없습니다. 설정해도 조용히 무시되고 실제 아카이브에 기록됩니다.
 
+## 메시지 전송
+
+전송은 되돌릴 수 없고 다른 사람에게 도달할 수 있습니다. 먼저 대상 방만
+확인하는 `--dry-run`을 사용하십시오.
+
+```bash
+katok send --chat <chat-id> --dry-run --json
+katok send --room "정확한 방 이름" --dry-run --json
+```
+
+실제 텍스트·이미지 전송 또는 초안 입력에는
+[`ACCEPTABLE_USE_POLICY.md`](ACCEPTABLE_USE_POLICY.md)와
+[`DISCLAIMER.md`](DISCLAIMER.md)를 읽었다는 명시적 확인이 필요합니다.
+
+```bash
+katok send --chat <chat-id> --text "확인한 메시지" --accept-use-policy --json
+katok send --chat <chat-id> --image ./photo.jpg --accept-use-policy --json
+katok send --chat <chat-id> --text "검토할 초안" --draft --accept-use-policy --json
+```
+
+`--accept-use-policy`는 법률 준수나 카카오의 승인을 보증하지 않습니다. 불법
+스팸, 사칭·계정 도용, 신고·차단·거부 이후의 연락, 스토킹·괴롭힘, 반복·대량·
+무인 전송, 개인정보 침해 및 보호조치 우회에는 사용할 수 없습니다. 업무용
+광고·알림은 카카오톡 채널, 비즈메시지, 알림톡 등 목적에 맞는 공식 제품을
+사용하십시오.
+
+이 구현의 네트워크 경계는 다음과 같습니다.
+
+- `katok send` 자체는 HTTP, WebSocket, 소켓 또는 카카오 원격 비공개
+  프로토콜·비공식 API를 직접 호출하지 않습니다.
+- 로컬 Accessibility, `CGEvent`, pasteboard, AppKit, 로컬 파일과 katok
+  아카이브만 사용합니다.
+- 실제 네트워크 전송은 로그인된 공식 KakaoTalk 앱이 수행합니다.
+- 이 설명은 `send` 경로에 한정됩니다. `media` 명령의 presigned CDN 다운로드
+  및 최초 모델 artifact 준비 등 다른 기능은 네트워크를 사용할 수 있습니다.
+
 ## CLI 명령 요약
 
 ```bash
@@ -241,6 +305,8 @@ katok transcript --chat <chat-id> --json
 katok transcript --chat <chat-id> --since 2026-07-20T00:00:00+09:00 --json
 katok media get --chat <chat-id> --no-cdn --json
 katok wipe-index --yes --json
+katok send --chat <chat-id> --dry-run --json
+katok send --chat <chat-id> --text "메시지" --accept-use-policy --json
 ```
 
 `katok transcript`는 한 채팅방에서 실제로 오간 말을 시간 순서대로 Markdown 파일로 내보냅니다. 검색이 "어떤 chunk가 관련 있나"에 답한다면 이 명령은 "무슨 말이 오갔나"에 답하므로, 방 하나를 밀린 채로 따라 읽을 때 씁니다. 라이브 카카오톡 DB가 아니라 아카이브를 읽으므로 최근 대화가 필요하면 `sync`를 먼저 실행합니다. 범위에 메시지가 없으면 파일을 만들지 않고, 파일 이름에 message id 범위가 들어가므로 나중 실행이 이전 결과를 덮어쓰지 않습니다. 카카오톡 시스템 메시지(입장·퇴장·초대)는 아카이브에는 남고 transcript에서만 빠집니다.

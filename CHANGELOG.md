@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.0 - 2026-08-02
+
+### Sending
+
+- The existing macOS Accessibility-based `katok send` command is enabled in
+  default builds. Read-only installs remain available with
+  `cargo install katok --no-default-features`.
+- Text, image, and draft modes fail before stdin, archive, Accessibility, or
+  KakaoTalk UI access unless `--accept-use-policy` is supplied. Read-only
+  listing and non-delivery `--dry-run` remain available without acceptance.
+- `katok send --list-windows` and `--list-rooms` no longer require a dummy
+  `--room` or `--chat` target.
+- `ACCEPTABLE_USE_POLICY.md` and `DISCLAIMER.md` prohibit spam, impersonation,
+  account theft, stalking, harassment, post-refusal contact, bulk/repetitive
+  sending, privacy violations, and access-control evasion.
+- The documented network boundary is scoped to `katok send`: it drives the
+  local official KakaoTalk app and makes no direct Kakao remote private
+  protocol/API or HTTP/socket call. Other subcommands may use documented CDN
+  or model-download paths.
+
 ## 0.2.0 - 2026-07-29
 
 ### Sending
