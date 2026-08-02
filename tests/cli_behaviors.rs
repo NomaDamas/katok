@@ -16,6 +16,53 @@ fn cli_help_identifies_katok_when_invoked() {
 }
 
 #[test]
+fn cli_default_build_exposes_send_with_policy_flag() {
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("  send"));
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args(["send", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--accept-use-policy"));
+}
+
+#[test]
+fn cli_send_requires_use_policy_acceptance_before_ui_access() {
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args(["send", "--room", "Synthetic QA Room"])
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to continue without --accept-use-policy",
+        ))
+        .stderr(predicate::str::contains("Accessibility").not())
+        .stderr(predicate::str::contains("KakaoTalk is not running").not());
+}
+
+#[test]
+fn cli_acceptance_preserves_empty_message_refusal() {
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args(["send", "--room", "Synthetic QA Room", "--accept-use-policy"])
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to send an empty message",
+        ))
+        .stderr(predicate::str::contains("Accessibility").not())
+        .stderr(predicate::str::contains("KakaoTalk is not running").not());
+}
+
+#[test]
 fn cli_media_get_help_documents_image_extraction_flags() {
     let mut cmd = Command::cargo_bin("katok").expect("katok binary");
     cmd.args(["media", "get", "--help"])
