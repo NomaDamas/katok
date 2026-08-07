@@ -58,3 +58,7 @@ __pycache__/
 
 # Personal project notes, never committed (public fork)
 CLAUDE.local.md
+
+# Agent session prompt logs written into the working copy. Untracked files sit
+# inside the package boundary, so `cargo package` was picking these up.
+/prompts/
