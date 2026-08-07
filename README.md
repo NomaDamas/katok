@@ -356,6 +356,19 @@ katok doctor --macos-probe --json
 
 생성된 아카이브, 인덱스, cache, 로그는 git에 넣지 않습니다. 자동화 테스트는 합성 fixture만 사용합니다. 실제 카카오톡 smoke test는 수동으로만 수행하고, 사용자가 명시하지 않은 대화 원문은 출력하지 않습니다.
 
+## 합성 데이터로 시연하기
+
+실제 대화를 보여줄 수 없는 자리(발표, 녹화, 스크린 공유)에서는 합성 fixture로 만든 별도 인덱스를 씁니다. 등장인물과 메시지는 전부 지어낸 것이고, `--data-dir`로 실제 아카이브와 완전히 분리됩니다.
+
+```bash
+./scripts/demo_index.sh --reset   # fixture 생성 + 시연용 인덱스 빌드
+./scripts/demo_query.sh           # "이번 달에 내가 한 약속" 질문에 답하는 흐름
+```
+
+시연 인덱스는 기본적으로 `~/Library/Application Support/katok-demo`에 만들어지고, `KATOK_DEMO_DIR`로 바꿀 수 있습니다. 실제 아카이브를 여는 명령은 하나도 실행되지 않습니다.
+
+fixture 본문은 `scripts/generate_demo_fixture.py`에 있습니다. 생성되는 `.jsonl`은 git이 무시하므로 시연 내용을 바꾸려면 이 스크립트를 고칩니다. 데이터는 방 8개에 걸쳐 있고, 다른 사람의 약속과 지난달 약속을 함께 담고 있어서 발신자 필터와 기간 필터가 실제로 동작해야 정답이 나옵니다.
+
 ## 개발
 
 ```bash
