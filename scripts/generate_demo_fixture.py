@@ -11,6 +11,11 @@ The dataset is shaped for one demo question -- "이번 달에 내가 하기로 �
 - July commitments sit next to August ones, so the answer needs a date filter
 - small talk outnumbers commitments, so a keyword sweep has to reject noise
 
+Before adding a persona, check the name against the contacts of whoever will
+run the demo. An invented Korean name lands on a real contact more often than
+it feels like it should, and this file is published; a viewer finding their own
+name in a "synthetic" fixture is the outcome to avoid.
+
 Usage:
     python3 scripts/generate_demo_fixture.py [out.jsonl]
 """
@@ -31,7 +36,7 @@ PEOPLE = {
     "한지민": "u-202",
     "오세훈": "u-203",
     "배수정": "u-204",
-    "박지훈": "u-205",
+    "서동혁": "u-205",
     "이서연": "u-206",
     "정민우": "u-207",
     "윤가람": "u-208",
@@ -43,7 +48,7 @@ ROOMS = {
     "class": ("2002", "AI 클래스 제작팀", "group"),
     "study": ("2003", "사내 AI 스터디", "group"),
     "crew": ("2004", "동네 러닝크루", "group"),
-    "jihoon": ("3001", "박지훈", "direct"),
+    "donghyeok": ("3001", "서동혁", "direct"),
     "seoyeon": ("3002", "이서연님", "direct"),
     "minwoo": ("3003", "정민우", "direct"),
     "garam": ("3004", "윤가람", "direct"),
@@ -76,7 +81,7 @@ SCRIPT: list[tuple[str, str, str, str]] = [
     ("seoyeon", "2026-07-28 05:31", OWNER, "네 찾아서 이번 주 안에 보내드릴게요."),
     ("study", "2026-07-29 10:02", "노아린", "다음 스터디 주제 뭐로 할까요?"),
     ("study", "2026-07-29 10:20", "윤가람", "제가 RAG 파트 준비해올게요"),
-    ("crew", "2026-07-30 12:00", "박지훈", "토요일 아침 러닝 가시는 분?"),
+    ("crew", "2026-07-30 12:00", "서동혁", "토요일 아침 러닝 가시는 분?"),
     ("crew", "2026-07-30 12:04", OWNER, "저요! 7시에 갈게요"),
     # --- August: the answer set ---
     ("seoyeon", "2026-08-01 02:12", "이서연", "하늘님 자료 혹시 정리되셨을까요?"),
@@ -118,9 +123,9 @@ SCRIPT: list[tuple[str, str, str, str]] = [
     ("delivery", "2026-08-04 07:55", "최현우", "혹시 진행 상황 공유 가능하실까요?"),
     ("minwoo", "2026-08-04 09:12", "정민우", "형 이력서 한 번만 봐줄 수 있어?"),
     ("minwoo", "2026-08-04 09:40", OWNER, "당연하지. 주말에 정리해서 피드백 드릴게요"),
-    ("jihoon", "2026-08-05 04:02", "박지훈", "하늘님 다음 주에 시간 되세요?"),
+    ("donghyeok", "2026-08-05 04:02", "서동혁", "하늘님 다음 주에 시간 되세요?"),
     (
-        "jihoon",
+        "donghyeok",
         "2026-08-05 04:20",
         OWNER,
         "네 좋아요! 다음 주 화요일로 커피챗 잡을게요.",
@@ -162,7 +167,7 @@ SCRIPT: list[tuple[str, str, str, str]] = [
         "주말 동안 촬영해서 월요일까지 전달드리겠습니다.",
     ),
     ("class", "2026-08-07 08:44", "배수정", "넵 확인했습니다"),
-    ("crew", "2026-08-07 11:00", "박지훈", "이번 주말 러닝 쉬어요"),
+    ("crew", "2026-08-07 11:00", "서동혁", "이번 주말 러닝 쉬어요"),
     ("crew", "2026-08-07 11:02", OWNER, "넵 알겠습니다 ㅋㅋ"),
 ]
 
