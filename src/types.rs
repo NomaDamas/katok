@@ -14,6 +14,14 @@ pub struct RawMessage {
     pub text: String,
     pub message_type: String,
     pub reply_to_message_id: Option<String>,
+    /// True when this message was authored by the account whose archive is read.
+    /// Older fixture/kakaocli payloads omit it and safely default to false.
+    #[serde(default)]
+    pub is_self: bool,
+    /// True only when source metadata explicitly mentions the account owner.
+    /// Text that merely contains a matching display name never sets this flag.
+    #[serde(default)]
+    pub mentions_self: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -250,4 +258,48 @@ pub struct SearchHit {
     pub score: f64,
     pub parent_chunk_ids: Vec<String>,
     pub child_chunk_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MentionStatus {
+    /// No later message authored by the account owner exists in this room.
+    Pending,
+    /// A later self-authored message exists, but it is not a direct reply.
+    Review,
+    /// A self-authored message directly replies to the mention.
+    Answered,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MentionInboxItem {
+    pub status: MentionStatus,
+    pub chat_id: String,
+    pub chat_name: String,
+    pub message_id: String,
+    pub sender_nickname: String,
+    pub timestamp: String,
+    pub snippet: String,
+    /// Chunk containing the mention, for explicit context retrieval.
+    pub chunk_id: Option<String>,
+    pub response_message_id: Option<String>,
+    pub response_timestamp: Option<String>,
+    pub response_snippet: Option<String>,
+    pub response_chunk_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MentionInboxCounts {
+    pub pending: usize,
+    pub review: usize,
+    pub answered: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MentionInboxReport {
+    pub since: String,
+    pub chat_id: Option<String>,
+    pub counts: MentionInboxCounts,
+    pub returned: usize,
+    pub items: Vec<MentionInboxItem>,
 }

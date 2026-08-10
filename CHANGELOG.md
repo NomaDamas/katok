@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Reading
+
+- Add a read-only `katok inbox` command that finds explicit mentions of the
+  account owner from native Kakao metadata and classifies them as `pending`,
+  `review`, or directly `answered`. A later general self-authored message stays
+  in review instead of being guessed complete.
+- Backfill self/mention metadata into existing archives without rebuilding
+  search chunks when message content did not change.
+
 ### Security
 
 - Default builds are read-only. The macOS UI-based `katok send` command now

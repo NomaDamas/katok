@@ -227,6 +227,8 @@ fn raw(
         text: text.to_string(),
         message_type: "text".to_string(),
         reply_to_message_id: reply_to_message_id.map(str::to_string),
+        is_self: false,
+        mentions_self: false,
     }
 }
 
@@ -392,6 +394,8 @@ fn synthetic_conversation() -> Vec<RawMessage> {
             text: format!("메시지 {idx}"),
             message_type: "text".to_string(),
             reply_to_message_id: None,
+            is_self: false,
+            mentions_self: false,
         });
     }
     for idx in 0..4 {
@@ -407,6 +411,8 @@ fn synthetic_conversation() -> Vec<RawMessage> {
             text: format!("직접 {idx}"),
             message_type: "text".to_string(),
             reply_to_message_id: None,
+            is_self: false,
+            mentions_self: false,
         });
     }
     messages
@@ -443,6 +449,8 @@ fn windowed_conversation() -> (Vec<RawMessage>, usize) {
             text: format!("메시지 {idx}"),
             message_type: "text".to_string(),
             reply_to_message_id: None,
+            is_self: false,
+            mentions_self: false,
         });
     }
     (messages, 6)
@@ -554,6 +562,8 @@ fn bursty_conversation() -> (Vec<RawMessage>, usize) {
                 text: format!("메시지 {idx}"),
                 message_type: "text".to_string(),
                 reply_to_message_id: None,
+                is_self: false,
+                mentions_self: false,
             });
             idx += 1;
         }

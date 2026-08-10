@@ -45,6 +45,27 @@ pub(crate) enum Commands {
         #[arg(long)]
         touched: bool,
     },
+    /// List explicit mentions that may still need a reply.
+    ///
+    /// This is read-only. A direct self-authored reply is marked answered; a
+    /// later general self message is kept as review rather than guessed done.
+    Inbox {
+        /// Only include mentions at or after this RFC3339 timestamp.
+        /// Defaults to the previous seven days.
+        #[arg(long)]
+        since: Option<String>,
+        /// Restrict the queue to one chat_id.
+        #[arg(long)]
+        chat: Option<String>,
+        /// Include mentions that have a direct self-authored reply.
+        #[arg(long)]
+        all: bool,
+        /// Maximum number of queue items to return. Counts cover the full range.
+        #[arg(long, default_value_t = 100, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=10_000))]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
     Index {
         #[arg(long)]
         full: bool,

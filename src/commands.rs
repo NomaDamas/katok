@@ -2,6 +2,7 @@ use crate::cli::{Commands, PermissionsCommand, SearchCommand, SourceCommand};
 use crate::commands::source_adapter::adapter_for_source;
 use crate::support::{dependency_status, print_payload};
 use anyhow::{Context, Result};
+use chrono::{DateTime, Duration, Utc};
 use katok::{
     archive::Archive,
     chunking::{
@@ -73,6 +74,21 @@ pub(crate) fn run(
             &semantic_dir,
             &data_dir,
         ),
+        Commands::Inbox {
+            since,
+            chat,
+            all,
+            limit,
+            json,
+        } => run_inbox(
+            since.as_deref(),
+            chat.as_deref(),
+            all,
+            limit,
+            json,
+            &config,
+            &archive_path,
+        ),
         Commands::Search { command } => run_search(command, &config, &archive_path, &semantic_dir),
         Commands::Chunk { command } => chunk_commands::run(command, &archive_path),
         Commands::Source { command } => run_source(command, &config, &data_dir),
@@ -120,6 +136,34 @@ pub(crate) fn run(
             &archive_path,
         ),
     }
+}
+
+fn run_inbox(
+    since: Option<&str>,
+    chat: Option<&str>,
+    include_answered: bool,
+    limit: usize,
+    json: bool,
+    config: &KatokConfig,
+    archive_path: &Path,
+) -> Result<()> {
+    let since = match since {
+        Some(value) => DateTime::parse_from_rfc3339(value)
+            .context("parse --since as RFC3339")?
+            .with_timezone(&Utc),
+        None => Utc::now() - Duration::days(7),
+    };
+    let archive = Archive::open(archive_path).context("open archive")?;
+    let report = archive
+        .mention_inbox(
+            &since.to_rfc3339(),
+            chat,
+            include_answered,
+            limit,
+            config.snippet_length,
+        )
+        .context("build mention inbox")?;
+    print_payload(json, &report)
 }
 
 #[allow(clippy::too_many_arguments)]

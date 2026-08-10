@@ -98,12 +98,13 @@ fn create_encrypted_db(path: &Path, key: &str) {
             (200, 21, 4, 500, 26, NULL, NULL, 'image caption', 1700000300),
             (200, 22, 5, 600, 1, '{\"reply\":{\"src_logId\":20}}', NULL, 'this is a reply', 1700000400),
             (200, 23, 6, 500, 1, NULL, NULL, '', 1700000500),
-            -- Shaped the way a real KakaoTalk reply is: type 26, src_logId at
-            -- the top level of `attachment`, and `supplement` empty. Measured on
-            -- a live install as 6891 of 6891 replies. The row above it is the
-            -- hypothetical `supplement` shape the reader used to look for, which
-            -- is why the old fixture passed while nothing resolved in practice.
-            (200, 24, 7, 600, 26, NULL, '{\"src_logId\":20,\"src_type\":1,\"src_userId\":600}', 'real-shaped reply', 1700000600)",
+            -- Compatibility fixture: type 26, src_logId at the top level of
+            -- `attachment`, and `supplement` empty. The preceding row covers
+            -- the alternate nested `supplement` shape.
+            (200, 24, 7, 600, 26, NULL, '{\"src_logId\":20,\"src_type\":1,\"src_userId\":600}', 'real-shaped reply', 1700000600),
+            (200, 25, 8, 600, 1, NULL, '{\"mentions\":[{\"user_id\":240061982,\"at\":[1],\"len\":5}]}', '@Owner please review', 1700000700),
+            (200, 26, 9, 600, 1, NULL, '{\"mentions\":[{\"user_id\":700,\"at\":[1],\"len\":4}]}', '@Other please review', 1700000800),
+            (200, 27, 10, 240061982, 1, NULL, '{\"mentions\":[{\"user_id\":240061982,\"at\":[1],\"len\":5}]}', '@Owner self-authored', 1700000900)",
         [],
     )
     .expect("insert messages");
@@ -136,7 +137,7 @@ fn reads_synthetic_kakao_db_and_maps_model() {
     let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
 
     // Empty-text message (logId 23) is filtered out → 6 messages remain.
-    assert_eq!(output.messages.len(), 6);
+    assert_eq!(output.messages.len(), 9);
 
     // Two chats discovered with correct classification.
     assert_eq!(output.chats.len(), 2);
@@ -192,11 +193,21 @@ fn reads_synthetic_kakao_db_and_maps_model() {
     let reply = by_id("200-22");
     assert_eq!(reply.reply_to_message_id.as_deref(), Some("200-20"));
 
-    // The shape real KakaoTalk actually writes: `src_logId` on `attachment`,
-    // nothing in `supplement`. Reading only `supplement` resolved zero replies
-    // on a live archive while every unit test stayed green.
+    // Top-level `src_logId` in `attachment` is accepted when `supplement` is
+    // absent, alongside the nested compatibility shape above.
     let real_reply = by_id("200-24");
     assert_eq!(real_reply.reply_to_message_id.as_deref(), Some("200-20"));
+
+    // A top-level mentions array targets the account owner by numeric user_id.
+    let mentioned = by_id("200-25");
+    assert!(!mentioned.is_self);
+    assert!(mentioned.mentions_self);
+
+    // Mentions of someone else and self-authored mention-shaped metadata do not
+    // enter the owner's reply queue.
+    assert!(!by_id("200-26").mentions_self);
+    assert!(by_id("200-27").is_self);
+    assert!(!by_id("200-27").mentions_self);
 
     // Account hash is the stable sha256(user_id) for every row.
     let account = &output.messages[0].account_hash;
@@ -213,7 +224,10 @@ fn reads_synthetic_kakao_db_and_maps_model() {
         .filter(|message| message.chat_id == "200")
         .map(|message| message.message_id.as_str())
         .collect();
-    assert_eq!(chat_200, vec!["200-20", "200-21", "200-22", "200-24"]);
+    assert_eq!(
+        chat_200,
+        vec!["200-20", "200-21", "200-22", "200-24", "200-25", "200-26", "200-27"]
+    );
 }
 
 /// A single malformed message row (a non-UTF8 BLOB stored in the TEXT `message`
@@ -301,8 +315,8 @@ fn discovers_and_reads_db_suffixed_file() {
     };
     let output = katok::kakao::read_kakao_with_options(&options).expect("read kakao");
 
-    // Same content as the bare-named DB: 6 mapped messages, 2 chats.
-    assert_eq!(output.messages.len(), 6);
+    // Same content as the bare-named DB: 9 mapped messages, 2 chats.
+    assert_eq!(output.messages.len(), 9);
     assert_eq!(output.chats.len(), 2);
 }
 

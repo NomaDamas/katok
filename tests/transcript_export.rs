@@ -29,6 +29,8 @@ fn message_of_type(
         text: text.to_string(),
         message_type: message_type.to_string(),
         reply_to_message_id: None,
+        is_self: false,
+        mentions_self: false,
     }
 }
 

@@ -764,3 +764,148 @@ fn cli_prune_deleted_rebuilds_before_the_later_edit_floor() {
         "deleted text must leave chunks and keyword search even when the chat also has a later edit"
     );
 }
+
+#[test]
+fn cli_inbox_classifies_pending_review_and_directly_answered_mentions() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let data_dir = dir.path();
+    let fixture = dir.path().join("mentions.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            "{\"account_hash\":\"acct-self\",\"chat_id\":\"room-1\",\"chat_name\":\"Synthetic Ops\",\"chat_type\":\"group\",\"message_id\":\"m1\",\"sender_id\":\"peer-1\",\"sender_nickname\":\"Peer One\",\"timestamp\":\"2026-08-10T01:00:00Z\",\"text\":\"first mention\",\"message_type\":\"text\",\"reply_to_message_id\":null,\"is_self\":false,\"mentions_self\":true}\n",
+            "{\"account_hash\":\"acct-self\",\"chat_id\":\"room-1\",\"chat_name\":\"Synthetic Ops\",\"chat_type\":\"group\",\"message_id\":\"m2\",\"sender_id\":\"self\",\"sender_nickname\":\"Owner\",\"timestamp\":\"2026-08-10T01:05:00Z\",\"text\":\"a later general message\",\"message_type\":\"text\",\"reply_to_message_id\":null,\"is_self\":true,\"mentions_self\":false}\n",
+            "{\"account_hash\":\"acct-self\",\"chat_id\":\"room-1\",\"chat_name\":\"Synthetic Ops\",\"chat_type\":\"group\",\"message_id\":\"m3\",\"sender_id\":\"peer-2\",\"sender_nickname\":\"Peer Two\",\"timestamp\":\"2026-08-10T02:00:00Z\",\"text\":\"second mention\",\"message_type\":\"text\",\"reply_to_message_id\":null,\"is_self\":false,\"mentions_self\":true}\n",
+            "{\"account_hash\":\"acct-self\",\"chat_id\":\"room-1\",\"chat_name\":\"Synthetic Ops\",\"chat_type\":\"group\",\"message_id\":\"m4\",\"sender_id\":\"self\",\"sender_nickname\":\"Owner\",\"timestamp\":\"2026-08-10T02:05:00Z\",\"text\":\"direct answer\",\"message_type\":\"text\",\"reply_to_message_id\":\"m3\",\"is_self\":true,\"mentions_self\":false}\n",
+            "{\"account_hash\":\"acct-self\",\"chat_id\":\"room-1\",\"chat_name\":\"Synthetic Ops\",\"chat_type\":\"group\",\"message_id\":\"m5\",\"sender_id\":\"peer-3\",\"sender_nickname\":\"Peer Three\",\"timestamp\":\"2026-08-10T03:00:00Z\",\"text\":\"latest pending mention\",\"message_type\":\"text\",\"reply_to_message_id\":null,\"is_self\":false,\"mentions_self\":true}\n",
+            "{\"account_hash\":\"acct-self\",\"chat_id\":\"room-2\",\"chat_name\":\"Old Synthetic\",\"chat_type\":\"group\",\"message_id\":\"old\",\"sender_id\":\"peer-4\",\"sender_nickname\":\"Old Peer\",\"timestamp\":\"2026-07-01T00:00:00Z\",\"text\":\"old mention\",\"message_type\":\"text\",\"reply_to_message_id\":null,\"is_self\":false,\"mentions_self\":true}\n"
+        ),
+    )
+    .expect("write mention fixture");
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "sync",
+            "--source",
+            "fixture",
+            fixture.to_str().expect("utf8 path"),
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let output = Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "inbox",
+            "--since",
+            "2026-08-01T00:00:00Z",
+            "--json",
+        ])
+        .output()
+        .expect("run inbox");
+    assert!(output.status.success(), "inbox should succeed");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid inbox json");
+    assert_eq!(payload["counts"]["pending"], 1);
+    assert_eq!(payload["counts"]["review"], 1);
+    assert_eq!(payload["counts"]["answered"], 1);
+    assert_eq!(payload["items"].as_array().expect("items").len(), 2);
+    assert_eq!(payload["items"][0]["message_id"], "m5");
+    assert_eq!(payload["items"][0]["status"], "pending");
+    let pending_chunk_id = payload["items"][0]["chunk_id"]
+        .as_str()
+        .expect("pending mention links to its chunk");
+    assert_eq!(payload["items"][1]["message_id"], "m1");
+    assert_eq!(payload["items"][1]["status"], "review");
+    assert_eq!(
+        payload["items"][1]["response_snippet"],
+        "a later general message"
+    );
+    assert!(payload["items"][1]["response_chunk_id"].is_string());
+    assert!(
+        payload["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .all(|item| item["message_id"] != "m3"),
+        "directly answered mentions stay out of the default queue"
+    );
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "chunk",
+            "get",
+            pending_chunk_id,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("latest pending mention"));
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "inbox",
+            "--since",
+            "2026-08-01T00:00:00Z",
+            "--all",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"message_id\": \"m3\""))
+        .stdout(predicate::str::contains("\"status\": \"answered\""));
+}
+
+#[test]
+fn metadata_only_mention_backfill_does_not_rebuild_chat_chunks() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let fixture = dir.path().join("metadata.jsonl");
+    let write_fixture = |is_self: bool, mentions_self: bool| {
+        std::fs::write(
+            &fixture,
+            format!(
+                "{{\"account_hash\":\"acct\",\"chat_id\":\"room\",\"chat_name\":\"Synthetic\",\"chat_type\":\"group\",\"message_id\":\"m1\",\"sender_id\":\"owner\",\"sender_nickname\":\"Owner\",\"timestamp\":\"2026-08-10T00:00:00Z\",\"text\":\"same text\",\"message_type\":\"text\",\"reply_to_message_id\":null,\"is_self\":{is_self},\"mentions_self\":{mentions_self}}}\n"
+            ),
+        )
+        .expect("write metadata fixture");
+    };
+    let sync = || {
+        Command::cargo_bin("katok")
+            .expect("katok binary")
+            .args([
+                "--data-dir",
+                dir.path().to_str().expect("utf8 path"),
+                "sync",
+                "--source",
+                "fixture",
+                fixture.to_str().expect("utf8 path"),
+                "--json",
+                "--touched",
+            ])
+            .output()
+            .expect("sync fixture")
+    };
+
+    write_fixture(false, false);
+    assert!(sync().status.success());
+    write_fixture(true, false);
+    let second = sync();
+    assert!(second.status.success());
+    let payload: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("metadata sync json");
+    assert_eq!(payload["updated_messages"], 1);
+    assert_eq!(payload["rebuilt_chats"], 0);
+    assert_eq!(payload["touched_chats"], serde_json::json!([]));
+}

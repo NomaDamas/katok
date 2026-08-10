@@ -2,6 +2,7 @@ use crate::{Error, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 
+mod inbox;
 mod model;
 mod parent;
 mod read;
@@ -113,5 +114,54 @@ mod tests {
             Archive::open(&archive_path).is_err(),
             "the archive must never follow a symbolic link"
         );
+    }
+
+    #[test]
+    fn legacy_archive_adds_mention_columns_before_dependent_indexes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("archive.sqlite3");
+        let conn = rusqlite::Connection::open(&path).expect("legacy connection");
+        conn.execute_batch(
+            "CREATE TABLE messages (
+                account_hash TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                chat_name TEXT NOT NULL,
+                chat_type TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
+                sender_nickname TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                text TEXT NOT NULL,
+                message_type TEXT NOT NULL,
+                reply_to_message_id TEXT,
+                PRIMARY KEY(account_hash, chat_id, message_id)
+            );",
+        )
+        .expect("legacy schema");
+        drop(conn);
+
+        let archive = Archive::open(&path).expect("migrate legacy archive");
+        let columns = archive
+            .connection()
+            .prepare("PRAGMA table_info(messages)")
+            .expect("prepare columns")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query columns")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("collect columns");
+        assert!(columns.iter().any(|column| column == "is_self"));
+        assert!(columns.iter().any(|column| column == "mentions_self"));
+
+        let indexes = archive
+            .connection()
+            .prepare("PRAGMA index_list(messages)")
+            .expect("prepare indexes")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query indexes")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("collect indexes");
+        assert!(indexes
+            .iter()
+            .any(|index| index == "idx_messages_pending_mentions"));
     }
 }

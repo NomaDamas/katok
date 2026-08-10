@@ -18,6 +18,7 @@ Accessibility로 조작합니다. 이는 카카오의 승인이나 이용제한 
 ## 무엇을 해주나
 
 - 카카오톡 macOS 앱의 로컬 DB를 읽어 대화 아카이브를 만듭니다.
+- 자신을 지목한 멘션을 `pending`, `review`, `answered`로 나눈 읽기 전용 답변 대기함을 제공합니다.
 - 정확한 단어 매칭용 `keyword`, SQLite FTS5 기반 `bm25`, EmbeddingGemma 기반 `semantic` 검색을 제공합니다.
 - 긴 대화는 카카오톡 흐름에 맞게 chunk로 나누고, 5분 안팎의 같은 채팅방 대화는 parent window로 묶어 벡터 검색 품질을 높입니다.
 - 검색 결과는 짧은 snippet과 chunk id만 보여줍니다. 원문 전체는 사용자가 명시적으로 `katok chunk get <chunk-id>`를 실행할 때만 출력합니다.
@@ -119,6 +120,7 @@ scripts/katok-macos-setup.sh
 ```bash
 katok doctor --json
 katok sync --source macos --json
+katok inbox --json
 katok index --json
 katok search keyword "계약서" --json
 katok search bm25 "지난주 미팅 자료" --json
@@ -131,6 +133,33 @@ katok search bm25 "지난주 미팅 자료" --limit 30 --json
 검색 최신성이 중요하면 검색 전에 항상 `katok doctor --json`의 `freshness`를 확인하세요. 이 기본 doctor는 macOS app data probe를 실행하지 않으므로 권한 prompt 없이 사용할 수 있습니다. `sync_before_search`가 `true`이면 `katok sync --source macos --json`을 먼저 실행하고, `index_before_semantic_search`가 `true`이면 `katok index --json`을 실행한 뒤 semantic search를 사용합니다.
 
 검색 결과에서 더 넓은 맥락이 필요하면 chunk 명령을 사용합니다.
+
+### 멘션 답변 대기함
+
+`katok inbox`는 메시지 본문의 이름을 검색하지 않고, macOS 카카오톡이 저장한
+명시적인 멘션 대상 메타데이터만 읽습니다. 따라서 닉네임이 본문에 단순히
+등장한 메시지를 멘션으로 잘못 잡지 않습니다.
+
+```bash
+katok sync --source macos --json
+katok inbox --json
+katok inbox --since 2026-08-01T00:00:00+09:00 --json
+katok inbox --chat <chat-id> --all --json
+```
+
+- `pending`: 멘션 뒤에 본인이 보낸 메시지가 없습니다.
+- `review`: 본인의 뒤 메시지는 있지만 해당 멘션에 직접 답장한 관계가 아니므로, 사람이 확인해야 합니다.
+- `answered`: 해당 멘션을 원문으로 지정한 본인의 직접 답장이 있습니다. 기본 결과에서는 빼고 `--all`일 때만 보여줍니다.
+
+기본 범위는 최근 7일, 기본 결과 한도는 100개입니다. 이 명령은 아카이브만
+읽으며 카카오톡 입력창을 열거나 메시지를 입력·전송하지 않습니다. 일반 메시지로
+답한 경우를 자동으로 완료 처리하지 않고 `review`로 남기는 것이 의도된 보수적
+판정입니다. 이 판정은 동기화된 로컬 기록 범위 밖의 삭제된 메시지나 다른
+기기의 미동기화 대화까지 증명하지는 않습니다.
+`items[].chunk_id`로 `katok chunk context <chunk-id> --json`을 실행하면 답변 초안에
+필요한 앞뒤 맥락을 명시적으로 열 수 있습니다.
+`review`와 `answered` 항목은 비교할 본인 메시지의 `response_snippet`과
+`response_chunk_id`도 함께 반환합니다.
 
 ```bash
 katok chunk get <chunk-id> --json
@@ -222,6 +251,7 @@ skills/katok/SKILL.md
 ```bash
 katok doctor --json
 katok sync --source macos --json
+katok inbox --json
 katok index --json
 katok search semantic "찾고 싶은 내용" --json
 katok chunk get <chunk-id> --json
@@ -233,9 +263,10 @@ katok chunk get <chunk-id> --json
 2. `sync_before_search`가 `true`이거나 최신 대화가 중요하면 `katok sync --source macos --json`을 실행합니다.
 3. semantic search 전에 `index_before_semantic_search`가 `true`이면 `katok index --json`을 실행합니다.
 4. 처음에는 `katok search keyword`, `katok search bm25`, `katok search semantic`으로 후보를 좁힙니다.
-5. 사용자가 특정 결과를 열어 달라고 하거나 chunk id를 제공했을 때만 `katok chunk get`으로 원문을 봅니다.
-6. semantic search 결과의 `child_chunk_ids`에서 정확한 원문으로 이동할 때는 `katok chunk context`와 `katok chunk parent`를 사용합니다.
-7. skill은 결과를 요약만 하고, indexing logic이나 DB 해독 logic을 자체 구현하지 않습니다.
+5. 답변할 멘션을 요청받으면 `katok inbox --json`으로 후보를 나누고, `review`를 자동으로 완료 처리하지 않습니다.
+6. 사용자가 특정 결과를 열어 달라고 하거나 chunk id를 제공했을 때만 `katok chunk get`으로 원문을 봅니다.
+7. semantic search 결과의 `child_chunk_ids`에서 정확한 원문으로 이동할 때는 `katok chunk context`와 `katok chunk parent`를 사용합니다.
+8. skill은 결과를 요약만 하고, indexing logic이나 DB 해독 logic을 자체 구현하지 않습니다.
 
 ## macOS 소스 어댑터
 
@@ -311,6 +342,8 @@ katok doctor --json
 katok source chats --source macos --json
 katok sync --source macos --json
 katok sync --json
+katok inbox --json
+katok inbox --since 2026-08-01T00:00:00+09:00 --all --json
 katok index --json
 katok search keyword "보고서" --json
 katok search bm25 "보고서" --json

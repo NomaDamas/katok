@@ -15,6 +15,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             text TEXT NOT NULL,
             message_type TEXT NOT NULL,
             reply_to_message_id TEXT,
+            is_self INTEGER NOT NULL DEFAULT 0,
+            mentions_self INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(account_hash, chat_id, message_id)
         );
         CREATE TABLE IF NOT EXISTS chats (
@@ -136,14 +138,34 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     .map_err(Error::Sql)?;
 
     // `CREATE TABLE IF NOT EXISTS` leaves an archive that predates a column alone, so added
-    // columns need an explicit step. Defaulting to 0 makes every such archive read as drift,
-    // which rebuilds its chunks once under the current chunker — the safe direction.
+    // columns need an explicit step. A missing chunker version defaults to 0 and triggers one
+    // safe rebuild; message metadata defaults to false and is backfilled on the next sync.
     add_column_if_missing(
         conn,
         "chunk_settings",
         "chunker_version",
         "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(conn, "messages", "is_self", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(
+        conn,
+        "messages",
+        "mentions_self",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+
+    // These indices depend on the two columns above, so create them after the
+    // explicit migration rather than in the initial CREATE batch. Existing
+    // archives otherwise fail to open before ALTER TABLE can run.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_messages_pending_mentions
+             ON messages(timestamp, chat_id, message_id)
+             WHERE mentions_self = 1 AND is_self = 0;
+         CREATE INDEX IF NOT EXISTS idx_messages_self_chat_timestamp
+             ON messages(account_hash, chat_id, timestamp, message_id)
+             WHERE is_self = 1;",
     )
+    .map_err(Error::Sql)
 }
 
 fn add_column_if_missing(

@@ -372,6 +372,35 @@ fn coerce_log_id(value: &serde_json::Value) -> Option<i64> {
     }
 }
 
+/// Return true only when a top-level Kakao mention entry explicitly targets
+/// `user_id`. Mention display text is not authoritative: nicknames can change,
+/// collide, or appear in ordinary prose. The metadata shape is an array such as
+/// `{"mentions":[{"user_id":123,"at":[1],"len":5}]}`.
+fn mentions_user_id(metadata: Option<&str>, user_id: i64) -> bool {
+    let Some(raw) = metadata.filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let Ok(serde_json::Value::Object(root)) = serde_json::from_str(raw) else {
+        return false;
+    };
+    let Some(serde_json::Value::Array(mentions)) = root.get("mentions") else {
+        return false;
+    };
+    mentions.iter().any(|mention| {
+        let serde_json::Value::Object(entry) = mention else {
+            return false;
+        };
+        ["user_id", "userId", "userid"]
+            .iter()
+            .filter_map(|key| entry.get(*key))
+            .any(|value| match value {
+                serde_json::Value::Number(number) => number.as_i64() == Some(user_id),
+                serde_json::Value::String(text) => text.trim().parse::<i64>() == Ok(user_id),
+                _ => false,
+            })
+    })
+}
+
 fn unreadable_database_warning() -> &'static str {
     "katok: skipping unreadable KakaoTalk db"
 }
@@ -449,7 +478,8 @@ fn read_one(
             .cloned()
             .unwrap_or_else(|| format!("chat-{chat_id}"));
 
-        let sender_nickname = if author_id == user_id {
+        let is_self = author_id == user_id;
+        let sender_nickname = if is_self {
             users
                 .get(&author_id)
                 .cloned()
@@ -482,6 +512,9 @@ fn read_one(
             .or_else(|| reply_parent_log_id(supplement.as_deref()))
             .filter(|parent| *parent != log_id)
             .map(|parent| format!("{chat_id}-{parent}"));
+        let mentions_self = !is_self
+            && (mentions_user_id(attachment.as_deref(), user_id)
+                || mentions_user_id(supplement.as_deref(), user_id));
 
         let chat_id_str = chat_id.to_string();
         chats
@@ -504,6 +537,8 @@ fn read_one(
             text,
             message_type,
             reply_to_message_id,
+            is_self,
+            mentions_self,
         });
     }
 
@@ -651,6 +686,20 @@ mod tests {
             reply_parent_log_id(Some(r#"{"attachment":{"src_logId":4242}}"#)),
             None
         );
+    }
+
+    #[test]
+    fn parses_only_explicit_top_level_mention_targets() {
+        let numeric = r#"{"mentions":[{"user_id":42,"at":[1],"len":5}]}"#;
+        let string = r#"{"mentions":[{"userId":"42"}]}"#;
+        assert!(mentions_user_id(Some(numeric), 42));
+        assert!(mentions_user_id(Some(string), 42));
+        assert!(!mentions_user_id(Some(numeric), 7));
+        assert!(!mentions_user_id(
+            Some(r#"{"nested":{"mentions":[{"user_id":42}]}}"#),
+            42
+        ));
+        assert!(!mentions_user_id(Some("not json"), 42));
     }
 
     #[test]

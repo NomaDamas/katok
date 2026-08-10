@@ -1,6 +1,6 @@
 ---
 name: katok
-description: Search local KakaoTalk keyword, BM25, and EmbeddingGemma vector indexes through the katok CLI, list rooms, export chunks or transcripts, extract attachments, and prepare guarded message sends only after explicit user confirmation.
+description: Search local KakaoTalk keyword, BM25, and EmbeddingGemma vector indexes through the katok CLI, triage explicit mentions into a conservative reply queue, list rooms, export chunks or transcripts, extract attachments, and prepare guarded message sends only after explicit user confirmation.
 ---
 
 # katok
@@ -27,6 +27,8 @@ katok permissions macos                   # opens Full Disk Access settings
 katok doctor --macos-probe --json        # explicit macOS permission/app-data probe
 katok sync --source macos --json          # reads live macOS KakaoTalk (needs Full Disk Access)
 katok sync --json                         # uses source_adapter from config
+katok inbox --json                        # pending/review mentions from the previous 7 days
+katok inbox --since 2026-08-01T00:00:00+09:00 --all --json
 katok index --json                        # builds local EmbeddingGemma vector index
 katok index --full --json                 # full rebuild instead of incremental
 katok source chats --source macos --json  # lists rooms with their chat ids
@@ -67,11 +69,23 @@ environment variable; setting one is silently ignored and the run writes into th
 4. Inspect the `freshness` section from `doctor --json` before search.
 5. Run `katok sync --source macos --json` when `freshness.recommendation.sync_before_search` is `true`, when the user asks for recent messages, or when search freshness matters.
 6. Run `katok index --json` before semantic search when `freshness.recommendation.index_before_semantic_search` is `true` or after a sync that should affect vector search.
-7. Use `katok search keyword ...`, `katok search bm25 ...`, and `katok search semantic ...` for discovery.
-8. Use `katok chunk get ...` only for explicit retrieval.
-9. Run `katok doctor --macos-probe --json` only for setup or permission diagnostics, because it may trigger a macOS "access data from other apps" prompt.
-10. Run `wipe-index`, `sync --prune-deleted`, or a non-dry-run media command only
+7. When the user asks what explicit mentions still need a reply, run `katok inbox --json`. Treat `review` as unresolved until a person verifies it; never promote it to answered from an unrelated later self message.
+8. Use `katok search keyword ...`, `katok search bm25 ...`, and `katok search semantic ...` for discovery.
+9. Use `katok chunk get ...` only for explicit retrieval.
+10. Run `katok doctor --macos-probe --json` only for setup or permission diagnostics, because it may trigger a macOS "access data from other apps" prompt.
+11. Run `wipe-index`, `sync --prune-deleted`, or a non-dry-run media command only
     when the user explicitly requests that destructive or network/write action.
+
+`katok inbox` reads only the local archive and never opens a room, stages text,
+or sends. It uses explicit mention-target metadata, not nickname text matching.
+Its statuses are deliberately conservative: `answered` requires a direct
+self-authored reply edge, `review` means a later self-authored message exists
+without that edge, and `pending` means none exists. The result cannot prove
+anything outside the locally synchronized retention window. Use an item's
+`chunk_id` with `katok chunk context <chunk-id> --json` only when the user asks
+to inspect or draft from that mention's surrounding conversation. For a
+`review` item, compare `response_snippet` and use `response_chunk_id` when more
+context is required; do not assume the later message answers the mention.
 
 ## Message Sending Safety
 

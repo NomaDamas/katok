@@ -151,7 +151,14 @@ pub const SCOPED_REF_REBUILD_STATEMENTS: [&str; 5] = [
 enum MessageChange {
     Inserted,
     Updated,
+    MetadataUpdated,
     Unchanged,
+}
+
+impl MessageChange {
+    const fn affects_chunks(self) -> bool {
+        matches!(self, Self::Inserted | Self::Updated)
+    }
 }
 
 impl Archive {
@@ -180,7 +187,7 @@ impl Archive {
                 self.upsert_chat(message)?;
             }
             let change = self.upsert_message(message)?;
-            if change != MessageChange::Unchanged {
+            if change.affects_chunks() {
                 let key = (message.timestamp.to_rfc3339(), message.message_id.as_str());
                 earliest_changed
                     .entry(message.chat_id.as_str())
@@ -197,7 +204,10 @@ impl Archive {
                     });
             }
             inserted += usize::from(change == MessageChange::Inserted);
-            updated += usize::from(change == MessageChange::Updated);
+            updated += usize::from(matches!(
+                change,
+                MessageChange::Updated | MessageChange::MetadataUpdated
+            ));
             cursors
                 .entry(message.account_hash.as_str())
                 .and_modify(|newest| {
@@ -355,13 +365,14 @@ impl Archive {
 
     fn upsert_message(&self, message: &RawMessage) -> Result<MessageChange> {
         let exists = self.message_exists(message)?;
-        let changed = self
+        let content_changed = self
             .conn
             .prepare_cached(
                 "INSERT INTO messages
              (account_hash, chat_id, chat_name, chat_type, message_id, sender_id,
-              sender_nickname, timestamp, text, message_type, reply_to_message_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+              sender_nickname, timestamp, text, message_type, reply_to_message_id,
+              is_self, mentions_self)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(account_hash, chat_id, message_id) DO UPDATE SET
                  chat_name = excluded.chat_name,
                  chat_type = excluded.chat_type,
@@ -392,12 +403,35 @@ impl Archive {
                 message.timestamp.to_rfc3339(),
                 message.text,
                 message.message_type,
-                message.reply_to_message_id
+                message.reply_to_message_id,
+                message.is_self,
+                message.mentions_self
             ])
             .map_err(Error::Sql)?;
-        Ok(match (exists, changed) {
-            (false, 1) => MessageChange::Inserted,
-            (true, 1) => MessageChange::Updated,
+        // Mention/self flags do not affect chunks or FTS text. Updating them
+        // separately lets an upgraded archive learn the new metadata without
+        // rebuilding every chat that contains a self-authored message.
+        let metadata_changed = self
+            .conn
+            .prepare_cached(
+                "UPDATE messages
+                 SET is_self = ?4, mentions_self = ?5
+                 WHERE account_hash = ?1 AND chat_id = ?2 AND message_id = ?3
+                   AND (is_self <> ?4 OR mentions_self <> ?5)",
+            )
+            .map_err(Error::Sql)?
+            .execute(params![
+                message.account_hash,
+                message.chat_id,
+                message.message_id,
+                message.is_self,
+                message.mentions_self
+            ])
+            .map_err(Error::Sql)?;
+        Ok(match (exists, content_changed, metadata_changed) {
+            (false, 1, _) => MessageChange::Inserted,
+            (true, 1, _) => MessageChange::Updated,
+            (true, 0, 1) => MessageChange::MetadataUpdated,
             _ => MessageChange::Unchanged,
         })
     }

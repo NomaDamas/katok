@@ -96,6 +96,8 @@ fn parent_windows_cap_single_large_child_when_indexed() {
         text: long_text,
         message_type: "text".to_string(),
         reply_to_message_id: None,
+        is_self: false,
+        mentions_self: false,
     };
 
     archive.sync_messages(&[message]).expect("sync message");
