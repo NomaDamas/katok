@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- Default builds are read-only. The macOS UI-based `katok send` command now
+  requires an explicit `--features private-send` build.
+- Reject non-HTTPS, credential-bearing, local-hostname, and non-public IP CDN
+  URLs before a request, and disable redirects so a validated public URL cannot
+  redirect to a local service.
+- Restrict `wipe-index` to a canonical child of the katok data directory,
+  including protection against symlink escapes.
+- Create or repair the local plaintext archive with owner-only mode `0600`, and
+  refuse archive paths that resolve through a symbolic link.
+- Update `anyhow` and `crossbeam-epoch` to patched releases and audit locked
+  dependencies in CI and release validation.
+- Pin GitHub Actions to full commit SHAs and grant release write permissions
+  only to the jobs that publish a release or update the Homebrew formula.
+
 ## 0.3.0 - 2026-08-02
 
 ### Sending

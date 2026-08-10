@@ -13,8 +13,12 @@ if ! command -v "$KATOK_BIN" >/dev/null 2>&1; then
 fi
 
 echo "Opening macOS permission settings..."
-"$KATOK_BIN" permissions macos --accessibility
-echo "Enable your terminal app for Full Disk Access. Enable Accessibility too if you plan to use KakaoTalk UI automation, then press Enter."
+PERMISSION_ARGS=(macos)
+if [ "${KATOK_ENABLE_ACCESSIBILITY:-0}" = "1" ]; then
+  PERMISSION_ARGS+=(--accessibility)
+fi
+"$KATOK_BIN" permissions "${PERMISSION_ARGS[@]}"
+echo "Enable only the app that invokes katok for Full Disk Access, then press Enter. Accessibility is not needed by the default read-only build."
 read -r _
 
 echo "Checking KakaoTalk readiness..."

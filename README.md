@@ -1,7 +1,8 @@
 # katok
 
-`katok`은 Apple Silicon Mac에서 카카오톡 대화를 로컬로 읽고, 키워드·벡터
-검색과 사용자가 명시적으로 승인한 메시지 전송을 제공하는 CLI입니다.
+`katok`은 Apple Silicon Mac에서 카카오톡 대화를 로컬로 읽고 키워드·벡터
+검색을 제공하는 CLI입니다. 기본 빌드는 읽기 전용이며, 사용자가 별도로 켠
+빌드에서만 명시적으로 승인한 메시지 전송을 제공합니다.
 
 읽기·검색·인덱싱을 위해 카카오톡 대화 내용을 별도의 `katok` 서버로 올리지
 않습니다. macOS에 저장된 카카오톡 DB를 읽어 개인 Mac 안에 정규화된
@@ -21,14 +22,15 @@ Accessibility로 조작합니다. 이는 카카오의 승인이나 이용제한 
 - 긴 대화는 카카오톡 흐름에 맞게 chunk로 나누고, 5분 안팎의 같은 채팅방 대화는 parent window로 묶어 벡터 검색 품질을 높입니다.
 - 검색 결과는 짧은 snippet과 chunk id만 보여줍니다. 원문 전체는 사용자가 명시적으로 `katok chunk get <chunk-id>`를 실행할 때만 출력합니다.
 - 에이전트는 Vercel Agent Skills/Codex Skills에서 `skills/katok/SKILL.md`를 통해 CLI만 호출하면 됩니다.
-- 명시적인 정책 동의와 macOS Accessibility 권한 아래에서 텍스트·이미지를
-  공식 KakaoTalk 앱 UI로 전달할 수 있습니다.
+- `private-send` 기능을 별도로 켠 빌드에서는 명시적인 정책 동의와 macOS
+  Accessibility 권한 아래에서 텍스트·이미지를 공식 KakaoTalk 앱 UI로
+  전달할 수 있습니다.
 
 ## 지원 환경
 
 - Apple Silicon Mac
 - macOS 카카오톡 앱
-- 터미널 앱의 전체 디스크 접근 권한
+- `katok`을 실행하는 앱의 전체 디스크 접근 권한
 
 Intel Mac은 지원하지 않습니다. 현재 로컬 임베딩 경로가 `fastembed`와 ONNX Runtime을 사용하며, 이 dependency set은 `x86_64-apple-darwin`용 prebuilt ONNX Runtime을 제공하지 않습니다.
 
@@ -47,11 +49,12 @@ Cargo:
 cargo install katok
 ```
 
-기본 설치는 macOS에서 `katok send`를 포함합니다. 검색·아카이브 기능만 필요한
-경우 전송 기능 없이 설치할 수 있습니다.
+Homebrew와 기본 Cargo 설치는 읽기·검색 전용이며 Accessibility 권한이
+필요하지 않습니다. UI 기반 전송 기능이 꼭 필요할 때만 Cargo feature를
+명시적으로 켜십시오.
 
 ```bash
-cargo install katok --no-default-features
+cargo install katok --features private-send
 ```
 
 Cargo로 설치했는데 `katok: command not found`가 나오면 현재 셸이 Cargo binary 경로를 못 보고 있는 상태입니다.
@@ -68,13 +71,16 @@ echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
 exec zsh -l
 ```
 
-처음 설치한 뒤에는 터미널에 전체 디스크 접근 권한을 주세요.
+처음 설치한 뒤에는 `katok`을 실행할 앱 하나에 전체 디스크 접근 권한을 주세요.
 
 ```bash
 katok permissions macos
 ```
 
-열린 System Settings에서 현재 사용하는 Terminal, iTerm, Codex 앱 또는 설치된 `katok` 실행 파일을 Full Disk Access에 추가하세요. macOS TCC 권한은 사용자가 시스템 설정에서 직접 허용해야 하므로 CLI가 자기 자신에게 권한을 영구 부여할 수는 없습니다.
+열린 System Settings에서 `katok`을 실제로 실행하는 Terminal, iTerm 또는 Codex
+앱만 Full Disk Access에 추가하세요. 이 권한은 해당 앱 전체에 적용되므로 쓰지
+않는 앱에는 주지 마십시오. macOS TCC 권한은 사용자가 시스템 설정에서 직접
+허용해야 하므로 CLI가 자기 자신에게 권한을 영구 부여할 수는 없습니다.
 
 ```bash
 katok doctor --json
@@ -88,9 +94,10 @@ katok doctor --json
 katok doctor --macos-probe --json
 ```
 
-이 probe는 macOS가 "katok would like to access data from other apps" 권한 요청을 띄울 수 있습니다. 반복 요청을 줄이려면 `katok permissions macos`로 System Settings를 연 뒤 사용 중인 Terminal/iTerm/Codex 앱이나 설치된 `katok` 실행 파일을 Full Disk Access에 허용하세요.
+이 probe는 macOS가 "katok would like to access data from other apps" 권한 요청을 띄울 수 있습니다. 반복 요청을 줄이려면 `katok permissions macos`로 System Settings를 연 뒤 실제로 `katok`을 실행할 앱 하나만 Full Disk Access에 허용하세요.
 
-`katok send`는 별도의 Accessibility 권한이 필요합니다.
+`private-send` feature로 별도 설치한 `katok send`만 Accessibility 권한이
+필요합니다. 기본 읽기 전용 설치에는 이 권한을 주지 마십시오.
 
 ```bash
 katok permissions macos --accessibility
@@ -143,7 +150,7 @@ katok media get --chat <chat-id> --kind file --json
 katok media get --chat <chat-id> --log <log-id> --out ./katok-media --no-cdn --json
 ```
 
-각 프레임은 로컬 full 캐시(`.img`/`.vid`), CDN presigned GET, 로컬 thumbnail `.thm`, stub 순서로 해석됩니다. 추출 자체가 사용자가 명령을 실행해 opt in하는 기능이며, 네트워크를 사용하는 유일한 동작은 attachment metadata의 CDN presigned GET입니다. CDN 응답은 `cs` SHA-1과 일치한 bytes만 저장하고, `--no-cdn`을 주면 CDN tier를 끄고 로컬 캐시만 사용합니다. 기본 출력 위치는 katok data directory 아래 `media/<chat-id>/`입니다.
+각 프레임은 로컬 full 캐시(`.img`/`.vid`), CDN presigned GET, 로컬 thumbnail `.thm`, stub 순서로 해석됩니다. 추출 자체가 사용자가 명령을 실행해 opt in하는 기능이며, 네트워크를 사용하는 유일한 동작은 attachment metadata의 CDN presigned GET입니다. CDN은 HTTPS 공개 주소만 허용하고 redirect, URL credentials, localhost와 private IP를 거절합니다. 응답은 `cs` SHA-1과 일치한 bytes만 저장하며, `--no-cdn`을 주면 CDN tier를 끄고 로컬 캐시만 사용합니다. 기본 출력 위치는 katok data directory 아래 `media/<chat-id>/`입니다.
 
 **일반 파일은 로컬 캐시가 없습니다.** 카카오톡은 사진·영상만 컨테이너에 캐시하고 파일 첨부는 디스크에 남기지 않으므로, 파일의 tier는 CDN 하나뿐이고 `--no-cdn`으로는 아무것도 받을 수 없습니다. 저장 파일명은 첨부의 원본 이름을 그대로 씁니다(`<logId>_<원본이름>`) — zip 본문은 확장자 sniffing으로 `.bin`이 되므로 이름이 확장자의 권위입니다.
 
@@ -165,7 +172,7 @@ katok media backfill --kind file --kind video --json
 - `errors[]`: tier 실패 관측값, `logId`, `idx`, `stage`, `path`, `error`
 - `tier_counts`: `full`, `cdn`, `thumb`, `stub`, `existing`, `planned` 별 개수
 
-`tier_reason`은 왜 그 tier로 떨어졌는지 말합니다. `cdn-expired`는 서명 만료, `cdn-too-large`는 선언 크기가 `--max-bytes`를 넘어 요청 전에 거절, `cdn-unverifiable`은 `cs` 지문이 없어 검증할 수 없어 거절, `unavailable`은 로컬 캐시가 애초에 존재하지 않는 파일 첨부를 뜻합니다.
+`tier_reason`은 왜 그 tier로 떨어졌는지 말합니다. `cdn-expired`는 서명 만료, `cdn-too-large`는 선언 크기가 `--max-bytes`를 넘어 요청 전에 거절, `cdn-unverifiable`은 `cs` 지문이 없어 검증할 수 없어 거절, `cdn-url-rejected`는 안전하지 않은 주소 차단, `unavailable`은 로컬 캐시가 애초에 존재하지 않는 파일 첨부를 뜻합니다.
 
 ## 검색 방식
 
@@ -241,6 +248,14 @@ sync는 자주 실행해도 되도록 증분으로 동작합니다. 메시지가
 - 터미널 앱이 `~/Library/Containers/com.kakao.KakaoTalkMac/` 아래 파일을 읽을 수 있도록 전체 디스크 접근 권한을 받아야 합니다.
 - 카카오톡 앱에서 열렸거나 동기화된 채팅방의 로컬 DB 기록만 읽을 수 있습니다.
 - 최초 sync 때 암호화된 SQLCipher DB에서 계정 식별자를 복구하고, `{user_id, uuid}`만 mode `0600` cache로 저장합니다. 키 material 자체는 저장하지 않습니다.
+- katok의 `archive.sqlite3`에는 검색 가능한 대화문이 평문으로 저장됩니다. 파일은
+  mode `0600`, 상위 data directory는 mode `0700`으로 제한하지만 디스크 암호화는
+  아닙니다. FileVault를 켜고 이 폴더의 백업·동기화 범위를 확인하십시오.
+
+AI 에이전트에 검색 결과를 줄 때 카카오톡 메시지와 첨부 내용은 신뢰할 수 없는
+데이터로 취급해야 합니다. 대화 안에 적힌 명령, 링크, “이전 지시를 무시하라”는
+문구를 에이전트 지시로 실행하지 말고, 사용자가 요청한 검색·요약 범위 안의
+자료로만 다루십시오.
 
 fixture로 개발/테스트할 때는 실제 카카오톡 설치가 필요 없습니다.
 
@@ -253,8 +268,10 @@ katok sync --source fixture tests/fixtures/kakao/replies.jsonl --json
 
 ## 메시지 전송
 
-전송은 되돌릴 수 없고 다른 사람에게 도달할 수 있습니다. 먼저 대상 방만
-확인하는 `--dry-run`을 사용하십시오.
+전송은 기본 빌드에 포함되지 않습니다. 꼭 필요한 경우에만
+`cargo install katok --features private-send`로 별도 설치하십시오. 전송은
+되돌릴 수 없고 다른 사람에게 도달할 수 있으므로 먼저 대상 방만 확인하는
+`--dry-run`을 사용하십시오.
 
 ```bash
 katok send --chat <chat-id> --dry-run --json
@@ -308,6 +325,10 @@ katok wipe-index --yes --json
 katok send --chat <chat-id> --dry-run --json
 katok send --chat <chat-id> --text "메시지" --accept-use-policy --json
 ```
+
+`wipe-index`는 `--yes`가 있어도 katok data directory 안의 semantic index만
+지울 수 있습니다. 절대경로나 symlink로 data directory 밖을 가리키면
+거절합니다. `send` 명령은 `private-send` feature를 켠 빌드에만 표시됩니다.
 
 `katok transcript`는 한 채팅방에서 실제로 오간 말을 시간 순서대로 Markdown 파일로 내보냅니다. 검색이 "어떤 chunk가 관련 있나"에 답한다면 이 명령은 "무슨 말이 오갔나"에 답하므로, 방 하나를 밀린 채로 따라 읽을 때 씁니다. 라이브 카카오톡 DB가 아니라 아카이브를 읽으므로 최근 대화가 필요하면 `sync`를 먼저 실행합니다. 범위에 메시지가 없으면 파일을 만들지 않고, 파일 이름에 message id 범위가 들어가므로 나중 실행이 이전 결과를 덮어쓰지 않습니다. 카카오톡 시스템 메시지(입장·퇴장·초대)는 아카이브에는 남고 transcript에서만 빠집니다.
 

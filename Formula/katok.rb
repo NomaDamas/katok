@@ -15,8 +15,10 @@ class Katok < Formula
 
   def caveats
     <<~EOS
-      For native KakaoTalk sync, grant your terminal Full Disk Access:
+      For native KakaoTalk sync, grant only the app that invokes katok Full Disk Access:
         System Settings > Privacy & Security > Full Disk Access
+
+      The default build is read-only and does not need Accessibility permission.
 
       Then run:
         katok doctor --json
