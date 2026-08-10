@@ -41,6 +41,7 @@ def main() -> int:
     commit_formula_body = (
         commit_formula_match.group("body") if commit_formula_match is not None else ""
     )
+    action_refs = re.findall(r"uses:\s*[^@\s]+@([^\s#]+)", "\n".join([ci, release]))
 
     checks = [
         check("package-name", 'name = "katok"' in cargo, "Cargo package is named katok"),
@@ -57,6 +58,24 @@ def main() -> int:
             and "katok-adapters" not in cargo
             and "katok-kakao" not in cargo,
             "Cargo manifest has no internal workspace/path dependency",
+        ),
+        check(
+            "read-only-default",
+            re.search(r"\[features\]\s*\ndefault\s*=\s*\[\]", cargo) is not None,
+            "Default Cargo builds exclude private-send",
+        ),
+        check(
+            "pinned-actions",
+            bool(action_refs)
+            and all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in action_refs),
+            "GitHub Actions use full commit SHAs",
+        ),
+        check(
+            "release-least-privilege",
+            re.search(r"^permissions:\s*\n\s+contents: read", release, re.MULTILINE)
+            is not None
+            and release.count("contents: write") == 2,
+            "Release writes are limited to publishing jobs",
         ),
         check(
             "release-tag-trigger",
@@ -116,15 +135,19 @@ def main() -> int:
             "ci-preflight",
             "cargo publish --dry-run" in ci
             and "python3 scripts/verify_release_config.py" in ci
-            and "cargo clippy --all-targets -- -D warnings" in ci,
-            "CI runs lint, package, and release-config preflights",
+            and "cargo clippy --all-targets -- -D warnings" in ci
+            and "cargo test --all-targets --all-features" in ci
+            and "cargo audit" in ci,
+            "CI runs default/feature tests, audit, package, and release-config preflights",
         ),
         check(
             "release-preflight",
             "cargo publish --dry-run" in release
             and "python3 scripts/verify_release_config.py" in release
-            and "cargo clippy --all-targets -- -D warnings" in release,
-            "Release validation runs lint, package, and release-config preflights",
+            and "cargo clippy --all-targets -- -D warnings" in release
+            and "cargo test --all-targets --all-features" in release
+            and "cargo audit" in release,
+            "Release validation runs default/feature tests, audit, package, and release-config preflights",
         ),
     ]
 

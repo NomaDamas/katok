@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,7 +20,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Resolve version
         id: version
@@ -35,13 +35,13 @@ jobs:
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.91.0
           components: rustfmt, clippy
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -49,10 +49,23 @@ jobs:
       - name: Lint
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Lint private-send build
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
       - name: Test
         env:
           KATOK_EMBEDDER: local-test
         run: cargo test --all-targets
+
+      - name: Test private-send build
+        env:
+          KATOK_EMBEDDER: local-test
+        run: cargo test --all-targets --all-features
+
+      - name: Audit dependencies
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit
 
       - name: Verify package
         run: cargo publish --dry-run
@@ -72,16 +85,16 @@ jobs:
             target: aarch64-apple-darwin
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.91.0
           targets: ${{ matrix.target }}
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
 
       - name: Build
         run: cargo build --release --target "${{ matrix.target }}"
@@ -99,7 +112,7 @@ jobs:
           shasum -a 256 "dist/${name}.tar.gz" > "dist/${name}.tar.gz.sha256"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: katok-${{ matrix.target }}
           path: |
@@ -114,10 +127,10 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.91.0
 
@@ -133,9 +146,11 @@ jobs:
       - binaries
       - publish-crate
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
@@ -155,9 +170,11 @@ jobs:
       - validate
       - github-release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout tap branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
           path: tap
@@ -189,8 +206,10 @@ jobs:
 
             def caveats
               <<~EOS
-                For native KakaoTalk sync, grant your terminal Full Disk Access:
+                For native KakaoTalk sync, grant only the app that invokes katok Full Disk Access:
                   System Settings > Privacy & Security > Full Disk Access
+
+                The default build is read-only and does not need Accessibility permission.
 
                 Then run:
                   katok doctor --json
