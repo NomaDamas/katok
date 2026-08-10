@@ -85,7 +85,7 @@ pub(crate) fn run(
             out,
             json,
         } => run_transcript(&chat, since.as_deref(), out, json, &archive_path, &data_dir),
-        Commands::WipeIndex { yes, json } => run_wipe_index(yes, json, &semantic_dir),
+        Commands::WipeIndex { yes, json } => run_wipe_index(yes, json, &semantic_dir, &data_dir),
         #[cfg(all(target_os = "macos", feature = "private-send"))]
         Commands::Send {
             room,
@@ -566,12 +566,24 @@ fn run_chunks(chat: &str, json: bool, archive_path: &Path) -> Result<()> {
     print_payload(json, &chunks)
 }
 
-fn run_wipe_index(yes: bool, json: bool, semantic_dir: &Path) -> Result<()> {
+fn run_wipe_index(yes: bool, json: bool, semantic_dir: &Path, data_dir: &Path) -> Result<()> {
     if !yes {
         anyhow::bail!("refusing to wipe semantic index without --yes");
     }
     if semantic_dir.exists() {
-        std::fs::remove_dir_all(semantic_dir).context("remove semantic index")?;
+        let data_root = data_dir
+            .canonicalize()
+            .context("resolve data directory before wiping semantic index")?;
+        let target = semantic_dir
+            .canonicalize()
+            .context("resolve semantic index before wiping it")?;
+        if target == data_root || !target.starts_with(&data_root) {
+            anyhow::bail!(
+                "refusing to wipe a semantic index outside the data directory: {}",
+                semantic_dir.display()
+            );
+        }
+        std::fs::remove_dir_all(&target).context("remove semantic index")?;
     }
     print_payload(json, &serde_json::json!({"semantic_removed": true}))
 }

@@ -1,6 +1,7 @@
 //! Resolve KakaoTalk media through full cache, CDN, thumbnail, and stub tiers.
 
 use std::collections::BTreeMap;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -238,8 +239,14 @@ where
 /// 10 MB default, which silently turned every video and file larger than that
 /// into a `cdn-failed` record even though the URL was perfectly good.
 pub fn cdn_fetch(url: &str, timeout: Duration, max_bytes: u64) -> Result<Vec<u8>> {
+    validate_cdn_url(url)?;
     let config = ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
+        .https_only(true)
+        // A redirect could turn a validated public URL into a request to a
+        // loopback or private address. Kakao CDN signatures are direct URLs,
+        // so refuse redirects instead of expanding the network trust boundary.
+        .max_redirects(0)
         .build();
     let agent: ureq::Agent = config.into();
     let mut response = agent
@@ -247,6 +254,11 @@ pub fn cdn_fetch(url: &str, timeout: Duration, max_bytes: u64) -> Result<Vec<u8>
         .header("User-Agent", "KakaoTalk")
         .call()
         .map_err(|err| Error::Kakao(format!("cdn fetch failed: {err}")))?;
+    if response.status().is_redirection() {
+        return Err(Error::Kakao(
+            "cdn fetch refused a redirect response".to_string(),
+        ));
+    }
     response
         .body_mut()
         .with_config()
@@ -454,7 +466,10 @@ where
             .checksum_sha1
             .as_deref()
             .filter(|value| !value.is_empty());
-        if expired {
+        if let Err(err) = validate_cdn_url(url) {
+            why.push("cdn-url-rejected".to_string());
+            errors.push(error_record(frame, "cdn", &redact_url(url), err));
+        } else if expired {
             why.push("cdn-expired".to_string());
         } else if oversized {
             // Declared size is known before the request, so an oversized body
@@ -658,8 +673,112 @@ fn url_expires(url: &str) -> Option<i64> {
         .find_map(|part| part.strip_prefix("expires=")?.parse::<i64>().ok())
 }
 
+fn validate_cdn_url(raw: &str) -> Result<()> {
+    let parsed = url::Url::parse(raw)
+        .map_err(|err| Error::Kakao(format!("refusing CDN URL: invalid URL ({err})")))?;
+    if parsed.scheme() != "https" {
+        return Err(Error::Kakao(
+            "refusing CDN URL: only HTTPS is allowed".to_string(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(Error::Kakao(
+            "refusing CDN URL: credentials are not allowed".to_string(),
+        ));
+    }
+
+    match parsed.host() {
+        Some(url::Host::Domain(domain)) => {
+            let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+            if domain == "localhost"
+                || domain.ends_with(".localhost")
+                || domain.ends_with(".local")
+                || domain.ends_with(".internal")
+                || domain.ends_with(".lan")
+                || domain.ends_with(".home.arpa")
+            {
+                return Err(Error::Kakao(
+                    "refusing CDN URL: local hostnames are not allowed".to_string(),
+                ));
+            }
+        }
+        Some(url::Host::Ipv4(address)) if !is_public_ipv4(address) => {
+            return Err(Error::Kakao(
+                "refusing CDN URL: non-public IP addresses are not allowed".to_string(),
+            ));
+        }
+        Some(url::Host::Ipv6(address)) if !is_public_ipv6(address) => {
+            return Err(Error::Kakao(
+                "refusing CDN URL: non-public IP addresses are not allowed".to_string(),
+            ));
+        }
+        Some(_) => {}
+        None => {
+            return Err(Error::Kakao(
+                "refusing CDN URL: a host is required".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_public_ipv4(address: Ipv4Addr) -> bool {
+    let [a, b, c, _] = address.octets();
+    !matches!(
+        (a, b, c),
+        (0, _, _)
+            | (10, _, _)
+            | (100, 64..=127, _)
+            | (127, _, _)
+            | (169, 254, _)
+            | (172, 16..=31, _)
+            | (192, 0, 0)
+            | (192, 0, 2)
+            | (192, 168, _)
+            | (198, 18..=19, _)
+            | (198, 51, 100)
+            | (203, 0, 113)
+            | (224..=255, _, _)
+    )
+}
+
+fn is_public_ipv6(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
+    if address.is_unspecified()
+        || address.is_loopback()
+        || address.is_multicast()
+        || (segments[0] & 0xfe00) == 0xfc00
+        || (segments[0] & 0xffc0) == 0xfe80
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+    {
+        return false;
+    }
+
+    // IPv4-compatible and IPv4-mapped IPv6 addresses carry the IPv4 address
+    // in the final 32 bits. Apply the same public-address policy to both.
+    if segments[..6] == [0, 0, 0, 0, 0, 0]
+        || (segments[..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff)
+    {
+        let address = Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            segments[6] as u8,
+            (segments[7] >> 8) as u8,
+            segments[7] as u8,
+        );
+        return is_public_ipv4(address);
+    }
+    true
+}
+
 fn redact_url(url: &str) -> String {
-    url.split('?').next().unwrap_or(url).to_string()
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return "<invalid-cdn-url>".to_string();
+    };
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
 }
 
 fn join_reasons<'a>(items: impl IntoIterator<Item = &'a str>) -> String {
@@ -814,6 +933,45 @@ mod tests {
         assert_eq!(report.records[0].tier_reason, "full-not-cached+cdn-fetched");
         assert_eq!(report.records[0].sha1.as_deref(), Some(VECTOR_IMAGE_SHA1));
         options.cdn_enabled = false;
+    }
+
+    #[test]
+    fn cdn_rejects_non_https_and_local_targets_before_fetching() {
+        for url in [
+            "http://cdn.example/image",
+            "https://localhost/image",
+            "https://sub.localhost/image",
+            "https://127.0.0.1/image",
+            "https://10.0.0.1/image",
+            "https://169.254.1.1/image",
+            "https://[::1]/image",
+            "https://[::ffff:127.0.0.1]/image",
+            "https://[::10.0.0.1]/image",
+            "https://router.home.arpa/image",
+            "https://user:pass@cdn.example/image",
+        ] {
+            let (_, dirs, options) = fixture();
+            let mut input = frame();
+            input.cdn_url = Some(url.to_string());
+
+            let report =
+                resolve_media_frames_with_fetcher(CHAT_ID, &[input], &dirs, &options, |_, _, _| {
+                    panic!("an unsafe CDN URL must be rejected before fetching")
+                })
+                .expect("resolve");
+
+            assert_eq!(report.records[0].tier, MediaTier::Stub, "url: {url}");
+            assert!(
+                report.records[0].tier_reason.contains("cdn-url-rejected"),
+                "url: {url}"
+            );
+            assert_eq!(report.errors.len(), 1, "url: {url}");
+            assert_eq!(report.errors[0].stage, "cdn", "url: {url}");
+            assert!(
+                report.errors[0].error.contains("refusing CDN URL"),
+                "url: {url}"
+            );
+        }
     }
 
     #[test]

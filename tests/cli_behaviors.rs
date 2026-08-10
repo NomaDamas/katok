@@ -16,7 +16,19 @@ fn cli_help_identifies_katok_when_invoked() {
 }
 
 #[test]
-fn cli_default_build_exposes_send_with_policy_flag() {
+#[cfg(not(feature = "private-send"))]
+fn cli_default_build_is_read_only() {
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("  send").not());
+}
+
+#[test]
+#[cfg(feature = "private-send")]
+fn cli_private_send_build_exposes_policy_flag() {
     Command::cargo_bin("katok")
         .expect("katok binary")
         .arg("--help")
@@ -33,6 +45,7 @@ fn cli_default_build_exposes_send_with_policy_flag() {
 }
 
 #[test]
+#[cfg(feature = "private-send")]
 fn cli_send_requires_use_policy_acceptance_before_ui_access() {
     Command::cargo_bin("katok")
         .expect("katok binary")
@@ -48,6 +61,7 @@ fn cli_send_requires_use_policy_acceptance_before_ui_access() {
 }
 
 #[test]
+#[cfg(feature = "private-send")]
 fn cli_acceptance_preserves_empty_message_refusal() {
     Command::cargo_bin("katok")
         .expect("katok binary")
@@ -60,6 +74,83 @@ fn cli_acceptance_preserves_empty_message_refusal() {
         ))
         .stderr(predicate::str::contains("Accessibility").not())
         .stderr(predicate::str::contains("KakaoTalk is not running").not());
+}
+
+#[test]
+fn cli_wipe_index_refuses_a_target_outside_the_data_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data_dir = dir.path().join("data");
+    let external = dir.path().join("external-semantic");
+    let sentinel = external.join("keep.txt");
+    std::fs::create_dir_all(&external).expect("external semantic dir");
+    std::fs::write(&sentinel, "keep").expect("sentinel");
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "semantic_dir = {:?}\n",
+            external.to_str().expect("utf8 path")
+        ),
+    )
+    .expect("config");
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "--config",
+            config.to_str().expect("utf8 path"),
+            "wipe-index",
+            "--yes",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to wipe a semantic index outside the data directory",
+        ));
+
+    assert!(
+        sentinel.exists(),
+        "an external directory must remain untouched"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn cli_wipe_index_refuses_a_symlink_that_escapes_the_data_directory() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data_dir = dir.path().join("data");
+    let external = dir.path().join("external-semantic");
+    let sentinel = external.join("keep.txt");
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+    std::fs::create_dir_all(&external).expect("external semantic dir");
+    std::fs::write(&sentinel, "keep").expect("sentinel");
+    symlink(&external, data_dir.join("semantic-link")).expect("semantic symlink");
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "semantic_dir = \"semantic-link\"\n").expect("config");
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "--config",
+            config.to_str().expect("utf8 path"),
+            "wipe-index",
+            "--yes",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to wipe a semantic index outside the data directory",
+        ));
+
+    assert!(sentinel.exists(), "a symlink escape must remain untouched");
 }
 
 #[test]
