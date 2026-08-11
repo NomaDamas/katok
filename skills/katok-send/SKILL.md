@@ -129,7 +129,7 @@ sips -s format png ./confirmed.webp --out /tmp/katok-send.png
 
 # 2) Resend once, taking focus so the image menu path can run
 katok send --chat <chat-id> --image /tmp/katok-send.png \
-  --take-focus-now --json
+  --take-focus-now --accept-use-policy --json
 ```
 
 - Do **not** loop, schedule, or fan out. One convert + one resend, then report.
