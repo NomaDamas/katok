@@ -15,6 +15,17 @@ UUID_LITERAL = re.compile(
 )
 PERSONAL_HOME = re.compile(r"/(?:Users|home)/[A-Za-z0-9._-]+/")
 SAFE_SYNTHETIC_UUIDS = {"00000000-1111-2222-3333-444444444444"}
+SAFE_SYNTHETIC_DB_NAMES = {
+    "de345a8eb68ff0db3c1f8b94817936a00471d335162afc05cdfc758f638a33d427ea7742d4d420"
+}
+IDENTITY_FIXTURE_PATHS = {
+    "src/kakao/auth.rs",
+    "src/kakao/derive.rs",
+    "src/kakao/reader.rs",
+    "tests/reader_synthetic_db.rs",
+}
+INTEGER_LITERAL = re.compile(r"(?<![0-9A-Za-z_])\d[\d_]*\d(?![0-9A-Za-z_])")
+DB_NAME_LITERAL = re.compile(r"(?<![0-9A-Fa-f])[0-9a-f]{78}(?![0-9A-Fa-f])")
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,10 +91,28 @@ def main() -> int:
         for path, text in tracked.items()
         if any(match.group(0) not in SAFE_SYNTHETIC_UUIDS for match in UUID_LITERAL.finditer(text))
     )
+    plausible_real_user_id_paths = sorted(
+        path
+        for path, text in tracked.items()
+        if path in IDENTITY_FIXTURE_PATHS
+        and any(
+            100_000_000 <= int(match.group(0).replace("_", "")) <= 999_999_999
+            for match in INTEGER_LITERAL.finditer(text)
+        )
+    )
+    non_synthetic_db_name_paths = sorted(
+        path
+        for path, text in tracked.items()
+        if path in IDENTITY_FIXTURE_PATHS
+        and any(
+            match.group(0) not in SAFE_SYNTHETIC_DB_NAMES
+            for match in DB_NAME_LITERAL.finditer(text)
+        )
+    )
     live_oracle_paths = sorted(
         path
         for path, text in tracked.items()
-        if path.startswith(("src/", "tests/"))
+        if path.startswith(("src/", "tests/", "skills/"))
         and re.search(
             r"\b(?:reference machine|empirically verified|measured on|live archive|live install)\b",
             text,
@@ -196,9 +225,19 @@ def main() -> int:
             "UUID literals are limited to the explicit synthetic fixture value",
         ),
         check(
+            "synthetic-user-id-fixtures",
+            not plausible_real_user_id_paths,
+            "Identity fixtures exclude plausible real Kakao user-id literals",
+        ),
+        check(
+            "synthetic-db-name-fixtures",
+            not non_synthetic_db_name_paths,
+            "Derived DB-name oracles are limited to the synthetic fixture value",
+        ),
+        check(
             "no-live-derived-oracles",
             not live_oracle_paths,
-            "Source and tests state contracts without private live-observation provenance",
+            "Source, tests, and skills state contracts without private live-observation provenance",
         ),
     ]
 
