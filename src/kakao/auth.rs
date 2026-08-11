@@ -574,12 +574,12 @@ mod tests {
     fn extracts_platform_uuid_from_ioreg_block() {
         let sample = r#"  +-o IOPlatformExpertDevice  <class IOPlatformExpertDevice>
     {
-      "IOPlatformUUID" = "42C34717-27C3-538C-81E4-8B568287C7A0"
+      "IOPlatformUUID" = "00000000-1111-2222-3333-444444444444"
       "IOPlatformSerialNumber" = "XXXX"
     }"#;
         assert_eq!(
             extract_platform_uuid(sample).as_deref(),
-            Some("42C34717-27C3-538C-81E4-8B568287C7A0")
+            Some("00000000-1111-2222-3333-444444444444")
         );
     }
 
@@ -672,9 +672,9 @@ mod tests {
 
     #[test]
     fn scans_direct_user_id_key() {
-        let xml = "<plist><dict><key>userId</key><integer>240061982</integer></dict></plist>";
+        let xml = "<plist><dict><key>userId</key><integer>1000000001</integer></dict></plist>";
         let (ids, hash) = scan_plist_xml(xml);
-        assert_eq!(ids, vec![240_061_982]);
+        assert_eq!(ids, vec![1_000_000_001]);
         assert!(hash.is_none());
     }
 

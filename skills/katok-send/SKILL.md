@@ -105,8 +105,8 @@ single recovery in Troubleshooting).
 
 ## Troubleshooting
 
-Field notes from live KakaoTalk UI sends (macOS Accessibility path). Prefer
-these over inventing a second send path.
+Troubleshooting for KakaoTalk UI sends through the macOS Accessibility path.
+Keep this as the single send path.
 
 ### Image paste never shows confirmation
 

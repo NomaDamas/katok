@@ -1,5 +1,5 @@
 //! Open KakaoTalk SQLCipher DBs read-only and map their schema to the katok
-//! model. The open recipe is empirically verified: `cipher_compatibility = 3`
+//! model. The open recipe uses `cipher_compatibility = 3`
 //! then a passphrase `PRAGMA key`, then a `sqlite_master` probe.
 
 use std::collections::HashMap;
@@ -603,7 +603,7 @@ mod tests {
 
     #[test]
     fn account_hash_is_64_hex() {
-        let hash = account_hash(240_061_982);
+        let hash = account_hash(1_000_000_001);
         assert_eq!(hash.len(), 64);
         assert!(hash
             .bytes()
@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn unreadable_database_warning_does_not_disclose_filename() {
         let filename =
-            "3080037d7a3b71fbe90b9492c50faf90eb3a8d708baec8ec3f18346bf53568cf84c0251259f2a6";
+            "de345a8eb68ff0db3c1f8b94817936a00471d335162afc05cdfc758f638a33d427ea7742d4d420";
         let warning = unreadable_database_warning();
 
         assert!(!warning.contains(filename));

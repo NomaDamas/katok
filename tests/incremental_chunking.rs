@@ -387,7 +387,7 @@ fn synthetic_conversation() -> Vec<RawMessage> {
             chat_type: "group".to_string(),
             message_id: format!("a{idx:03}"),
             sender_id: "u1".to_string(),
-            sender_nickname: "보글이".to_string(),
+            sender_nickname: "합성A".to_string(),
             timestamp: base + chrono::Duration::seconds(60 * idx),
             text: format!("메시지 {idx}"),
             message_type: "text".to_string(),
@@ -402,7 +402,7 @@ fn synthetic_conversation() -> Vec<RawMessage> {
             chat_type: "direct".to_string(),
             message_id: format!("b{idx:03}"),
             sender_id: "u2".to_string(),
-            sender_nickname: "부리".to_string(),
+            sender_nickname: "합성B".to_string(),
             timestamp: base + chrono::Duration::seconds(30 * idx),
             text: format!("직접 {idx}"),
             message_type: "text".to_string(),
@@ -422,7 +422,7 @@ fn windowed_conversation() -> (Vec<RawMessage>, usize) {
     let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
         .expect("base timestamp")
         .with_timezone(&chrono::Utc);
-    let senders = ["보글이", "부리"];
+    let senders = ["합성A", "합성B"];
     let mut messages = Vec::new();
     for idx in 0..12usize {
         // First six march 60s apart; a 400s gap before index 6 forces the second window.
@@ -535,7 +535,7 @@ fn bursty_conversation() -> (Vec<RawMessage>, usize) {
     let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
         .expect("base timestamp")
         .with_timezone(&chrono::Utc);
-    let senders = ["보글이", "부리"];
+    let senders = ["합성A", "합성B"];
     // Burst n starts 400s + 60s*3 after the previous, well past the 300s window gap.
     let starts = [0i64, 520, 1040];
     let mut messages = Vec::new();
@@ -684,7 +684,7 @@ fn char_split_conversation() -> (Vec<RawMessage>, usize) {
     let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
         .expect("base timestamp")
         .with_timezone(&chrono::Utc);
-    let senders = ["보글이", "부리"];
+    let senders = ["합성A", "합성B"];
     let long = "가".repeat(200);
     let mut messages = Vec::new();
     // Burst 0: three short messages, one window.
@@ -715,7 +715,7 @@ fn char_split_conversation() -> (Vec<RawMessage>, usize) {
     messages.push(raw(
         "C",
         "c1-tail",
-        "하울",
+        "합성C",
         base + chrono::Duration::seconds(burst1_base + 60 * 20),
         "꼬리 한 줄",
         None,
@@ -792,7 +792,7 @@ fn an_in_place_nickname_change_widens_the_cut_and_matches_a_full_rebuild() {
 
     // Rename the second message of the first burst — no earlier gap, so the resolver must widen
     // to a whole-chat rebuild rather than freezing a changed prefix.
-    messages[1].sender_nickname = "하울".to_string();
+    messages[1].sender_nickname = "합성C".to_string();
     let change = [messages[1].clone()];
     full.sync_messages(&change).expect("sync change full");
     rebuild_chunks(&full).expect("ground-truth full rebuild");
@@ -821,7 +821,7 @@ fn an_in_place_nickname_change_widens_the_cut_and_matches_a_full_rebuild() {
     );
 
     // Mid-room change: second burst, so the cut is the first gap (start of that burst).
-    messages[4].sender_nickname = "새미".to_string();
+    messages[4].sender_nickname = "합성D".to_string();
     let mid = [messages[4].clone()];
     full.sync_messages(&mid).expect("sync mid full");
     rebuild_chunks(&full).expect("full after mid");
@@ -859,7 +859,7 @@ fn a_backfill_between_bursts_with_a_cross_chunk_reply_matches_a_full_rebuild() {
     let backfill = raw(
         "G",
         "g-backfill",
-        "보글이",
+        "합성A",
         base + chrono::Duration::seconds(300),
         "뒤늦은 메시지",
         Some(&messages[1].message_id),
@@ -929,7 +929,7 @@ fn messages_sharing_a_timestamp_at_a_boundary_lose_neither_coverage_nor_equivale
     let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
         .expect("base timestamp")
         .with_timezone(&chrono::Utc);
-    let senders = ["보글이", "부리", "하울"];
+    let senders = ["합성A", "합성B", "합성C"];
     let mut messages = Vec::new();
     for (idx, nick) in senders.iter().enumerate() {
         messages.push(raw(
@@ -956,7 +956,7 @@ fn messages_sharing_a_timestamp_at_a_boundary_lose_neither_coverage_nor_equivale
     messages.push(raw(
         "T",
         "t-tail",
-        "새미",
+        "합성D",
         shared + chrono::Duration::seconds(60),
         "꼬리",
         None,
@@ -1002,7 +1002,7 @@ fn large_room_messages(n: usize, burst: usize) -> (Vec<RawMessage>, usize) {
     let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
         .expect("base timestamp")
         .with_timezone(&chrono::Utc);
-    let senders = ["보글이", "부리"];
+    let senders = ["합성A", "합성B"];
     let mut messages = Vec::with_capacity(n);
     let mut idx = 0usize;
     let mut burst_idx = 0usize;
@@ -1281,14 +1281,14 @@ fn bm25_search_after_a_scoped_tail_rebuild_returns_what_a_full_rebuild_would() {
         messages.push(raw(
             "S",
             &format!("s-{idx}"),
-            "보글이",
+            "합성A",
             base + chrono::Duration::seconds(idx as i64 * 30),
             word,
             None,
         ));
     }
     // A second room so the search has something the tail rebuild never touches.
-    messages.push(raw("T", "t-0", "부리", base, "echo", None));
+    messages.push(raw("T", "t-0", "합성B", base, "echo", None));
 
     let full_dir = tempfile::tempdir().expect("tempdir");
     let full = Archive::open(&full_dir.path().join("archive.sqlite3")).expect("open archive");
@@ -1627,7 +1627,7 @@ fn a_per_chat_ref_rebuild_matches_a_full_ref_rebuild_and_edges_stay_intra_chat()
     // Mint format `{chat_id}-{log_id}` so the prefix invariant is directly assertable. Gaps keep
     // each sender turn as its own chunk so cross-chunk replies populate chunk_parent_refs.
     let mut messages = Vec::new();
-    for (chat, nick_a, nick_b) in [("roomA", "보글이", "부리"), ("roomB", "하울", "새미")]
+    for (chat, nick_a, nick_b) in [("roomA", "합성A", "합성B"), ("roomB", "합성C", "합성D")]
     {
         for i in 0..4 {
             let nick = if i % 2 == 0 { nick_a } else { nick_b };
@@ -1789,7 +1789,7 @@ fn a_per_chat_ref_rebuild_matches_a_full_ref_rebuild_and_edges_stay_intra_chat()
     let wave = raw(
         "roomA",
         "roomA-5",
-        "보글이",
+        "합성A",
         base + chrono::Duration::seconds(4 * 700),
         "꼬리",
         Some("roomA-1"),
