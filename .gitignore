@@ -32,11 +32,7 @@ kakao/auth.json
 # katok generated stores
 /.katok/
 /.minsync/
-/.omo/evidence/
-/.omo/ulw-loop/
-/.omo/evidence/live-minsync/*.tmp/
-/.omo/ulw-loop/evidence/*data/
-!/.omo/ulw-loop/**/*.jsonl
+/.omo/
 *.log
 
 # Rust

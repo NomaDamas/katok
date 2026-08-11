@@ -78,13 +78,13 @@ fn create_encrypted_db(path: &Path, key: &str) {
     )
     .expect("insert rooms");
 
-    // Users: a peer (500) and self (1000000001).
+    // Users: a peer (500) and an explicitly synthetic self id.
     conn.execute(
         "INSERT INTO NTUser(userId, linkId, friendNickName, nickName, displayName)
          VALUES (500, 0, 'Alice', NULL, 'Alice Display'),
-                (1000000001, 0, NULL, NULL, 'Me Display'),
+                (?1, 0, NULL, NULL, 'Me Display'),
                 (600, 0, NULL, 'BobNick', NULL)",
-        [],
+        rusqlite::params![TEST_USER_ID],
     )
     .expect("insert users");
 
@@ -93,18 +93,16 @@ fn create_encrypted_db(path: &Path, key: &str) {
         "INSERT INTO NTChatMessage(chatId, logId, msgId, authorId, type, supplement, attachment, message, sentAt)
          VALUES
             (100, 10, 1, 500, 1, NULL, NULL, 'direct hello', 1700000000),
-            (100, 11, 2, 1000000001, 1, NULL, NULL, 'direct reply body', 1700000100),
+            (100, 11, 2, ?1, 1, NULL, NULL, 'direct reply body', 1700000100),
             (200, 20, 3, 600, 1, NULL, NULL, 'group message', 1700000200),
             (200, 21, 4, 500, 26, NULL, NULL, 'image caption', 1700000300),
             (200, 22, 5, 600, 1, '{\"reply\":{\"src_logId\":20}}', NULL, 'this is a reply', 1700000400),
             (200, 23, 6, 500, 1, NULL, NULL, '', 1700000500),
-            -- Shaped the way a real KakaoTalk reply is: type 26, src_logId at
-            -- the top level of `attachment`, and `supplement` empty. Measured on
-            -- a live install as 6891 of 6891 replies. The row above it is the
-            -- hypothetical `supplement` shape the reader used to look for, which
-            -- is why the old fixture passed while nothing resolved in practice.
-            (200, 24, 7, 600, 26, NULL, '{\"src_logId\":20,\"src_type\":1,\"src_userId\":600}', 'real-shaped reply', 1700000600)",
-        [],
+            -- Reply fixture: type 26, src_logId at the top level of
+            -- `attachment`, and `supplement` empty. The row above retains the
+            -- alternate supplement shape so both parser contracts stay explicit.
+            (200, 24, 7, 600, 26, NULL, '{\"src_logId\":20,\"src_type\":1,\"src_userId\":600}', 'attachment-form reply', 1700000600)",
+        rusqlite::params![TEST_USER_ID],
     )
     .expect("insert messages");
 }
@@ -176,7 +174,7 @@ fn reads_synthetic_kakao_db_and_maps_model() {
 
     // Self message uses displayName.
     let self_message = by_id("100-11");
-    assert_eq!(self_message.sender_id, "1000000001");
+    assert_eq!(self_message.sender_id, TEST_USER_ID.to_string());
     assert_eq!(self_message.sender_nickname, "Me Display");
 
     // Group user falls back to nickName.
@@ -192,11 +190,13 @@ fn reads_synthetic_kakao_db_and_maps_model() {
     let reply = by_id("200-22");
     assert_eq!(reply.reply_to_message_id.as_deref(), Some("200-20"));
 
-    // The shape real KakaoTalk actually writes: `src_logId` on `attachment`,
-    // nothing in `supplement`. Reading only `supplement` resolved zero replies
-    // on a live archive while every unit test stayed green.
-    let real_reply = by_id("200-24");
-    assert_eq!(real_reply.reply_to_message_id.as_deref(), Some("200-20"));
+    // The attachment form keeps `src_logId` outside `supplement`; both forms
+    // remain synthetic and exercise distinct parser branches.
+    let attachment_reply = by_id("200-24");
+    assert_eq!(
+        attachment_reply.reply_to_message_id.as_deref(),
+        Some("200-20")
+    );
 
     // Account hash is the stable sha256(user_id) for every row.
     let account = &output.messages[0].account_hash;
@@ -344,8 +344,8 @@ fn reconstructs_names_for_unnamed_rooms() {
         "INSERT INTO NTUser(userId, linkId, friendNickName, nickName, displayName)
          VALUES (500, 0, 'Alice', NULL, 'Alice Display'),
                 (600, 0, NULL, 'BobNick', NULL),
-                (1000000001, 0, NULL, NULL, 'Me Display')",
-        [],
+                (?1, 0, NULL, NULL, 'Me Display')",
+        rusqlite::params![TEST_USER_ID],
     )
     .expect("insert users");
 
