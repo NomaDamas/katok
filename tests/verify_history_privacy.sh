@@ -10,8 +10,8 @@ git -C "${repo}" config user.email test@example.invalid
 git -C "${repo}" config user.name Test
 mkdir -p "${repo}/src/kakao"
 
-uuid_prefix="42C34717-27C3-538C"
-uuid_suffix="81E4-8B568287C7A0"
+uuid_prefix="AAAAAAAA-BBBB-CCCC"
+uuid_suffix="DDDD-EEEEEEEEEEEE"
 printf 'const UUID: &str = "%s-%s";\n' \
   "${uuid_prefix}" "${uuid_suffix}" > "${repo}/src/kakao/auth.rs"
 git -C "${repo}" add .
