@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2 - 2026-08-12
+
+### Release
+
+- Fixed release validation after the repository privacy rewrite by scanning
+  commits from the merge-base of the previous version tag through the current
+  release, rather than rescanning unrelated pre-remediation ancestors.
+
 ## 0.3.1 - 2026-08-12
 
 ### Privacy
