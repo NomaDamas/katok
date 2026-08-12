@@ -165,7 +165,7 @@ fn cli_reports_semantic_index_states_when_embedder_is_local_test_or_mocked() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
+        .stdout(predicate::str::contains(
             "semantic index has never been synced",
         ));
 
@@ -278,7 +278,7 @@ fn cli_lists_gap_chunks_and_applies_chunk_output_flags() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("chunk not found"));
+        .stdout(predicate::str::contains("chunk not found"));
 }
 
 #[test]
@@ -297,7 +297,7 @@ fn cli_rejects_malformed_config_and_missing_kakaocli_without_private_dump() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("config parse error"));
+        .stdout(predicate::str::contains("config parse error"));
 
     // Force kakaocli to be absent from PATH so the failure is deterministic
     // regardless of whether the host has kakaocli installed.
@@ -307,7 +307,7 @@ fn cli_rejects_malformed_config_and_missing_kakaocli_without_private_dump() {
         .args(["source", "chats", "--source", "kakaocli", "--json"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("kakaocli not found on PATH"));
+        .stdout(predicate::str::contains("kakaocli not found on PATH"));
 }
 
 #[test]

@@ -68,6 +68,7 @@ environment variable; setting one is silently ignored and the run writes into th
 5. Run `katok sync --source macos --json` when `freshness.recommendation.sync_before_search` is `true`, when the user asks for recent messages, or when search freshness matters.
 6. Run `katok index --json` before semantic search when `freshness.recommendation.index_before_semantic_search` is `true` or after a sync that should affect vector search.
 7. Use `katok search keyword ...`, `katok search bm25 ...`, and `katok search semantic ...` for discovery.
+   - A search returns a global top-k across rooms (default 10). For a person or topic that may occur across many rooms, raise `--limit` (for example 100) and group the returned hits by the stable `chat_id`; a room outside the first 10 is not an engine omission.
 8. Use `katok chunk get ...` only for explicit retrieval.
 9. Run `katok doctor --macos-probe --json` only for setup or permission diagnostics, because it may trigger a macOS "access data from other apps" prompt.
 
@@ -96,7 +97,7 @@ Use `katok chunk context <chunk-id> --json` to inspect the immediate previous an
 
 `katok index` runs the local `embeddinggemma-300m-q4` embedder in-process by default. Do not ask the user to start a Python, Jina, TEI, or local HTTP embedding server. Use `KATOK_EMBEDDER=mock` only for synthetic QA and `KATOK_EMBEDDER=local-test` only when you need deterministic local vector tests without downloading the model.
 
-The index never follows the KakaoTalk database on its own, so a search only ever reflects the last sync. Run `katok sync --source macos --json` before the first query of a session and before any question about recent messages. Skipping it does not return zero results, it silently returns a stale set. Freshness also depends on KakaoTalk itself running (`pgrep -x KakaoTalk`), because the source database receives new messages only while the app is up.
+The index never follows the KakaoTalk database on its own, so a search only ever reflects the last sync. Run `katok sync --source macos --json` before the first query of a session and before any question about recent messages. After sync, doctor compares the archive revision with the committed semantic generation and requests indexing when they differ; semantic search also refuses stale or orphaned generations instead of silently searching them. Freshness also depends on KakaoTalk itself running (`pgrep -x KakaoTalk`), because the source database receives new messages only while the app is up.
 
 Sync is cheap enough to run often because only chats whose messages changed have their chunk tails recomputed. Three runs still pay the full cost: the first sync on an empty archive, the first sync after `chunk_gap_group_seconds` or `chunk_gap_direct_seconds` changes, and the first sync after an upgrade that bumps the chunker version, which includes the first run against an archive written before the version was recorded. Each of these invalidates every stored chunk once, after which sync returns to the incremental path. The payload reports `rebuilt_chats` and a `timings_ms` breakdown (`read_source`, `upsert_messages`, `rebuild_chunks`), so a slow run can be attributed to a stage instead of guessed at.
 

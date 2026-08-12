@@ -79,8 +79,13 @@ fn live_semantic_cli_indexes_local_embeddings_and_searches_without_endpoint() {
         .success()
         .stdout(predicate::str::contains("chunk_2aeac4db0a04ceb2"));
 
-    assert!(data_dir.join("semantic/store").exists());
-    assert!(data_dir.join("semantic/cursor.json").exists());
+    let generation = std::fs::read_to_string(data_dir.join("semantic/CURRENT"))
+        .expect("read current generation");
+    let generation = data_dir
+        .join("semantic/generations")
+        .join(generation.trim());
+    assert!(generation.join("store").exists());
+    assert!(generation.join("cursor.json").exists());
 }
 
 #[test]
@@ -106,7 +111,7 @@ fn live_semantic_cli_rejects_stale_remote_embedding_endpoint_config() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
+        .stdout(predicate::str::contains(
             "unknown field `embedder_base_url`",
         ));
 }

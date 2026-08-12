@@ -56,14 +56,14 @@ fn cli_surfaces_kakaocli_failure_detail_instead_of_generic_message() {
         .failure();
 
     assert
-        .stderr(predicate::str::contains("kakaocli chats failed"))
-        .stderr(predicate::str::contains(
+        .stdout(predicate::str::contains("kakaocli chats failed"))
+        .stdout(predicate::str::contains(
             "SQL error: prepare: file is not a database",
         ))
         // Must not regress to the old misleading message.
-        .stderr(predicate::str::contains("not found or not configured").not())
+        .stdout(predicate::str::contains("not found or not configured").not())
         // Must not leak any message body, even on the error path.
-        .stderr(predicate::str::contains("합성 카카오 메시지").not());
+        .stdout(predicate::str::contains("합성 카카오 메시지").not());
 }
 
 #[cfg(unix)]

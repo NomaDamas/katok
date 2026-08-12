@@ -135,16 +135,20 @@ fn cli_rejects_stale_micro_chunk_semantic_cursor_when_searching() {
         .success();
 
     let semantic_dir = data_dir.join("semantic");
-    std::fs::create_dir_all(&semantic_dir).expect("create semantic dir");
+    let generation_dir = semantic_dir.join("generations/stale");
+    std::fs::create_dir_all(&generation_dir).expect("create semantic dir");
+    std::fs::write(semantic_dir.join("CURRENT"), "stale\n").expect("write current pointer");
     std::fs::write(
-        semantic_dir.join("cursor.json"),
+        generation_dir.join("cursor.json"),
         r#"{
   "source_id": "katok-kakao-parent-windows",
-  "last_synced_at": "2026-01-01T00:00:00Z",
-  "seen_token": "old",
+  "completed_at": "2026-01-01T00:00:00Z",
+  "archive_revision": "old",
   "chunk_schema_id": "katok-kakao-chunk-v1",
   "embedder_id": "embeddinggemma/local-test",
-  "vectorstore": "local"
+  "vectorstore": "local",
+  "semantic_units": "parent_windows",
+  "embedded_texts": 0
 }"#,
     )
     .expect("write stale cursor");
@@ -162,6 +166,6 @@ fn cli_rejects_stale_micro_chunk_semantic_cursor_when_searching() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("re-run katok index"))
-        .stderr(predicate::str::contains("katok-kakao-chunk-v1"));
+        .stdout(predicate::str::contains("re-run katok index"))
+        .stdout(predicate::str::contains("katok-kakao-chunk-v1"));
 }

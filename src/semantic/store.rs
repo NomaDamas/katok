@@ -1,5 +1,5 @@
 use crate::{Error, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags};
 use std::path::Path;
 
 pub(crate) struct LocalVectorStore {
@@ -9,8 +9,8 @@ pub(crate) struct LocalVectorStore {
 
 #[derive(Debug, Clone)]
 pub(crate) struct StoredVector {
-    pub chunk_id: String,
     pub content_hash: String,
+    pub vector: Vec<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -38,19 +38,66 @@ impl LocalVectorStore {
         Ok(Self { conn, dimension })
     }
 
+    pub(crate) fn open_existing(dir: &Path, dimension: usize) -> Result<Self> {
+        let path = dir.join("vectors.sqlite3");
+        if !path.is_file() {
+            return Err(Error::SemanticIndexStale(format!(
+                "vector store is missing at {}",
+                path.display()
+            )));
+        }
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(Error::Sql)?;
+        Ok(Self { conn, dimension })
+    }
+
     pub(crate) fn fetch(&self, chunk_id: &str) -> Result<Option<StoredVector>> {
         let mut statement = self
             .conn
-            .prepare("SELECT chunk_id, content_hash FROM vectors WHERE chunk_id = ?1")
+            .prepare("SELECT chunk_id, content_hash, vector FROM vectors WHERE chunk_id = ?1")
             .map_err(Error::Sql)?;
         let mut rows = statement.query(params![chunk_id]).map_err(Error::Sql)?;
         let Some(row) = rows.next().map_err(Error::Sql)? else {
             return Ok(None);
         };
         Ok(Some(StoredVector {
-            chunk_id: row.get(0).map_err(Error::Sql)?,
             content_hash: row.get(1).map_err(Error::Sql)?,
+            vector: decode_vector(
+                &row.get::<_, Vec<u8>>(2).map_err(Error::Sql)?,
+                self.dimension,
+            )?,
         }))
+    }
+
+    pub(crate) fn content_pairs(&self) -> Result<Vec<(String, String)>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT chunk_id, content_hash, vector FROM vectors ORDER BY chunk_id")
+            .map_err(Error::Sql)?;
+        let pairs = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(Error::Sql)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Sql)?;
+        pairs
+            .into_iter()
+            .map(|(chunk_id, content_hash, vector)| {
+                let expected = self.dimension * std::mem::size_of::<f32>();
+                if vector.len() != expected {
+                    return Err(Error::SemanticIndexStale(format!(
+                        "vector {chunk_id} has {} bytes, expected {expected}",
+                        vector.len()
+                    )));
+                }
+                Ok((chunk_id, content_hash))
+            })
+            .collect()
     }
 
     pub(crate) fn upsert(&self, item: &VectorUpsert) -> Result<()> {
@@ -79,31 +126,6 @@ impl LocalVectorStore {
                     item.heading_path,
                     vector
                 ],
-            )
-            .map_err(Error::Sql)?;
-        Ok(())
-    }
-
-    pub(crate) fn mark_seen(
-        &self,
-        chunk_id: &str,
-        seen_token: &str,
-        heading_path: &str,
-    ) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE vectors SET seen_token = ?2, heading_path = ?3 WHERE chunk_id = ?1",
-                params![chunk_id, seen_token, heading_path],
-            )
-            .map_err(Error::Sql)?;
-        Ok(())
-    }
-
-    pub(crate) fn delete_stale(&self, seen_token: &str) -> Result<()> {
-        self.conn
-            .execute(
-                "DELETE FROM vectors WHERE seen_token != ?1",
-                params![seen_token],
             )
             .map_err(Error::Sql)?;
         Ok(())

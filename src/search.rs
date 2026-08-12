@@ -47,6 +47,7 @@ pub fn bm25_search_with_snippet(
     if query.trim().is_empty() {
         return Err(Error::EmptyQuery);
     }
+    let fts_query = literal_fts_query(query);
     let mut stmt = archive
         .connection()
         .prepare(
@@ -59,13 +60,21 @@ pub fn bm25_search_with_snippet(
         )
         .map_err(Error::Sql)?;
     let ids = stmt
-        .query_map(params![query.trim(), limit as i64], |row| {
+        .query_map(params![fts_query, limit as i64], |row| {
             row.get::<_, String>(0)
         })
         .map_err(Error::Sql)?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Error::Sql)?;
     hydrate_hits(archive, ids, "bm25", query, snippet_length)
+}
+
+fn literal_fts_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) fn hydrate_hits(
@@ -84,6 +93,7 @@ pub(crate) fn hydrate_hits(
                 unit: "micro_chunk",
                 rank: idx + 1,
                 chunk_id: chunk.chunk_id,
+                chat_id: chunk.chat_id,
                 chat_name: chunk.chat_name,
                 sender_nickname: chunk.sender_nickname,
                 started_at: chunk.started_at,
@@ -115,6 +125,7 @@ pub(crate) fn hydrate_parent_hits(
                 unit: "parent_window",
                 rank: idx + 1,
                 chunk_id: parent.parent_id,
+                chat_id: parent.chat_id,
                 chat_name: parent.chat_name,
                 sender_nickname: "multiple".to_string(),
                 started_at: parent.started_at,
