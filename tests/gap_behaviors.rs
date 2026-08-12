@@ -24,7 +24,7 @@ fn cli_handles_plan_gap_edges_when_exercised() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
+        .stdout(predicate::str::contains(
             "semantic index has never been synced",
         ));
 
@@ -41,8 +41,8 @@ fn cli_handles_plan_gap_edges_when_exercised() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("fixture parse error on line 2"))
-        .stderr(predicate::str::contains("PRIVATE-MALFORMED-BODY").not());
+        .stdout(predicate::str::contains("fixture parse error on line 2"))
+        .stdout(predicate::str::contains("PRIVATE-MALFORMED-BODY").not());
 
     Command::cargo_bin("katok")
         .expect("katok binary")
@@ -91,14 +91,14 @@ fn cli_handles_plan_gap_edges_when_exercised() {
         .success()
         .stdout(predicate::str::contains("\"written_documents\": 1"))
         .stdout(predicate::str::contains("window_"))
-        .stdout(predicate::str::contains("embeddinggemma-300m-q4"));
+        .stdout(predicate::str::contains("embeddinggemma/local-test"));
 
     Command::cargo_bin("katok")
         .expect("katok binary")
         .args(["--data-dir", data_dir, "search", "bm25", "", "--json"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("empty query"));
+        .stdout(predicate::str::contains("empty query"));
 
     Command::cargo_bin("katok")
         .expect("katok binary")
@@ -112,7 +112,7 @@ fn cli_handles_plan_gap_edges_when_exercised() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("chunk not found"));
+        .stdout(predicate::str::contains("chunk not found"));
 
     Command::cargo_bin("katok")
         .expect("katok binary")

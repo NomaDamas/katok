@@ -63,7 +63,13 @@ fn cli_honors_configured_semantic_dir_when_indexing() {
         .assert()
         .success();
 
-    let document_dir = data_dir.join("custom-semantic/source/chunks");
+    let semantic_dir = data_dir.join("custom-semantic");
+    let generation =
+        std::fs::read_to_string(semantic_dir.join("CURRENT")).expect("read current generation");
+    let document_dir = semantic_dir
+        .join("generations")
+        .join(generation.trim())
+        .join("source/chunks");
     let documents = std::fs::read_dir(document_dir)
         .expect("read semantic docs")
         .collect::<Result<Vec<_>, _>>()

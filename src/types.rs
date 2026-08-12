@@ -242,6 +242,7 @@ pub struct SearchHit {
     pub unit: &'static str,
     pub rank: usize,
     pub chunk_id: String,
+    pub chat_id: String,
     pub chat_name: String,
     pub sender_nickname: String,
     pub started_at: String,

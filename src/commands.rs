@@ -9,7 +9,7 @@ use katok::{
     },
     config::KatokConfig,
     search::{bm25_search_with_snippet, keyword_search_with_snippet},
-    semantic::{semantic_search_live_with_config, semantic_search_with_snippet},
+    semantic::semantic_search_live_with_config,
     transcript::export_transcript,
     types::SyncTimings,
 };
@@ -22,6 +22,39 @@ mod index_commands;
 mod media_commands;
 mod permissions;
 mod source_adapter;
+
+pub(crate) fn command_requests_json(command: &Commands) -> bool {
+    match command {
+        Commands::Doctor { json, .. }
+        | Commands::Sync { json, .. }
+        | Commands::Index { json, .. }
+        | Commands::WipeIndex { json, .. }
+        | Commands::Chunks { json, .. }
+        | Commands::Transcript { json, .. } => *json,
+        Commands::Search { command } => match command {
+            SearchCommand::Keyword { json, .. }
+            | SearchCommand::Bm25 { json, .. }
+            | SearchCommand::Semantic { json, .. } => *json,
+        },
+        Commands::Chunk { command } => match command {
+            crate::cli::ChunkCommand::Get { json, .. }
+            | crate::cli::ChunkCommand::Context { json, .. }
+            | crate::cli::ChunkCommand::Parent { json, .. } => *json,
+        },
+        Commands::Source { command } => match command {
+            SourceCommand::Chats { json, .. } => *json,
+        },
+        Commands::Media { command } => match command {
+            crate::cli::MediaCommand::Get { json, .. }
+            | crate::cli::MediaCommand::Backfill { json, .. } => *json,
+        },
+        Commands::Permissions { command } => match command {
+            PermissionsCommand::Macos { json, .. } => *json,
+        },
+        #[cfg(all(target_os = "macos", feature = "private-send"))]
+        Commands::Send { json, .. } => *json,
+    }
+}
 
 pub(crate) fn run(
     command: Commands,
@@ -312,7 +345,7 @@ fn run_doctor(
         "data_dir": data_dir,
         "archive": archive_path,
         "semantic_index": semantic_dir,
-        "freshness": freshness::load(&data_dir)?,
+        "freshness": freshness::load(&data_dir, &archive_path, &semantic_dir)?,
         "local_first": true,
         "macos": cfg!(target_os = "macos"),
         "source_adapter": {
@@ -520,30 +553,19 @@ fn run_search(
             print_payload(json, &hits)
         }
         SearchCommand::Semantic { query, limit, json } => {
-            let hits = if std::env::var("KATOK_EMBEDDER").unwrap_or_default() == "mock" {
-                semantic_search_with_snippet(
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("create semantic runtime")?;
+            let hits = runtime
+                .block_on(semantic_search_live_with_config(
                     &archive,
                     semantic_dir,
                     &query,
                     limit,
-                    config.snippet_length,
-                )
-                .context("semantic search")?
-            } else {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .context("create semantic runtime")?;
-                runtime
-                    .block_on(semantic_search_live_with_config(
-                        &archive,
-                        semantic_dir,
-                        &query,
-                        limit,
-                        config,
-                    ))
-                    .context("semantic search")?
-            };
+                    config,
+                ))
+                .context("semantic search")?;
             print_payload(json, &hits)
         }
     }

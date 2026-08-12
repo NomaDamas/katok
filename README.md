@@ -121,7 +121,7 @@ katok search bm25 "지난주 미팅 자료" --limit 30 --json
 
 각 `search` 명령은 `--limit <N>`(기본 10)으로 반환할 결과 개수를 조절할 수 있습니다.
 
-검색 최신성이 중요하면 검색 전에 항상 `katok doctor --json`의 `freshness`를 확인하세요. 이 기본 doctor는 macOS app data probe를 실행하지 않으므로 권한 prompt 없이 사용할 수 있습니다. `sync_before_search`가 `true`이면 `katok sync --source macos --json`을 먼저 실행하고, `index_before_semantic_search`가 `true`이면 `katok index --json`을 실행한 뒤 semantic search를 사용합니다.
+검색 최신성이 중요하면 검색 전에 항상 `katok doctor --json`의 `freshness`를 확인하세요. 이 기본 doctor는 macOS app data probe를 실행하지 않으므로 권한 prompt 없이 사용할 수 있습니다. `sync_before_search`가 `true`이면 `katok sync --source macos --json`을 먼저 실행하고, `index_before_semantic_search`가 `true`이면 `katok index --json`을 실행한 뒤 semantic search를 사용합니다. doctor와 semantic search는 archive revision을 현재 committed index generation과 비교하므로, sync 뒤 index가 오래됐거나 vector ID가 archive와 어긋나면 검색 전에 명시적으로 재인덱싱을 요구합니다.
 
 검색 결과에서 더 넓은 맥락이 필요하면 chunk 명령을 사용합니다.
 
@@ -173,7 +173,11 @@ katok media backfill --kind file --kind video --json
 
 `katok search bm25`는 SQLite FTS5 BM25 랭킹을 사용합니다. 여러 단어가 섞인 일반 질의에 적합합니다.
 
+BM25 입력은 FTS5 연산식이 아니라 일반 검색어로 처리됩니다. `+`, `-`, 따옴표, 괄호 같은 문자가 포함되어도 문자 그대로 tokenizer에 전달되며 FTS5 column filter나 boolean 문법으로 실행되지 않습니다.
+
 `katok search semantic`은 EmbeddingGemma로 만든 로컬 벡터 인덱스를 사용합니다. 표현이 정확히 기억나지 않아도 의미가 비슷한 대화를 찾을 수 있습니다.
+
+`katok index`는 새 generation을 완전히 만든 뒤 `CURRENT` 포인터를 원자적으로 교체합니다. 실패하면 이전 generation이 그대로 유지되고 명령은 non-zero로 끝납니다. `--full`은 기존 vector를 재사용하지 않는 완전 rebuild이고, 기본 index는 healthy generation의 동일 vector만 재사용하며 무결성 불일치가 있으면 archive에서 self-heal합니다.
 
 ## EmbeddingGemma 로컬 벡터 검색
 

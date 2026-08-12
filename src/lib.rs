@@ -37,6 +37,10 @@ pub enum Error {
     MissingChunk(String),
     #[error("semantic index has never been synced")]
     SemanticIndexMissing,
+    #[error("semantic index is stale or corrupt: {0}; re-run katok index")]
+    SemanticIndexStale(String),
+    #[error("semantic index rebuild is already running: {0}")]
+    SemanticIndexBusy(std::path::PathBuf),
     #[error("invalid semantic path: {0}")]
     InvalidSemanticPath(std::path::PathBuf),
     #[error("unsupported source adapter: {0}")]
