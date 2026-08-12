@@ -3,7 +3,7 @@ use crate::{
     types::{Chunk, ChunkContext, ChunkSummary, ParentChunk},
     Error, Result,
 };
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 
 impl Archive {
@@ -65,51 +65,12 @@ impl Archive {
     }
 
     pub fn all_parent_chunks(&self) -> Result<Vec<ParentChunk>> {
+        if !self.conn.is_autocommit() {
+            return load_all_parent_chunks(&self.conn);
+        }
         let tx = self.conn.unchecked_transaction().map_err(Error::Sql)?;
-        let mut parents = {
-            let mut stmt = tx
-                .prepare(
-                    "SELECT parent_id, chat_id, chat_name, started_at, ended_at,
-                            text, message_count
-                     FROM parent_chunks
-                     ORDER BY started_at, parent_id",
-                )
-                .map_err(Error::Sql)?;
-            let parents = stmt
-                .query_map([], |row| {
-                    Ok(ParentChunk {
-                        parent_id: row.get(0)?,
-                        chat_id: row.get(1)?,
-                        chat_name: row.get(2)?,
-                        started_at: row.get(3)?,
-                        ended_at: row.get(4)?,
-                        text: row.get(5)?,
-                        message_count: row.get::<_, i64>(6)? as usize,
-                        child_chunk_ids: Vec::new(),
-                    })
-                })
-                .map_err(Error::Sql)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(Error::Sql)?;
-            parents
-        };
-        let children = {
-            let mut stmt = tx
-                .prepare(
-                    "SELECT parent_id, chunk_id
-                     FROM parent_chunk_children
-                     ORDER BY parent_id, ordinal",
-                )
-                .map_err(Error::Sql)?;
-            let children = stmt
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .map_err(Error::Sql)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(Error::Sql)?;
-            children
-        };
+        let parents = load_all_parent_chunks(&tx)?;
         tx.commit().map_err(Error::Sql)?;
-        attach_parent_children(&mut parents, children)?;
         Ok(parents)
     }
 
@@ -190,6 +151,51 @@ impl Archive {
     }
 }
 
+fn load_all_parent_chunks(conn: &Connection) -> Result<Vec<ParentChunk>> {
+    let mut parents = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT parent_id, chat_id, chat_name, started_at, ended_at,
+                        text, message_count
+                 FROM parent_chunks
+                 ORDER BY started_at, parent_id",
+            )
+            .map_err(Error::Sql)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ParentChunk {
+                    parent_id: row.get(0)?,
+                    chat_id: row.get(1)?,
+                    chat_name: row.get(2)?,
+                    started_at: row.get(3)?,
+                    ended_at: row.get(4)?,
+                    text: row.get(5)?,
+                    message_count: row.get::<_, i64>(6)? as usize,
+                    child_chunk_ids: Vec::new(),
+                })
+            })
+            .map_err(Error::Sql)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Sql)?
+    };
+    let children = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT parent_id, chunk_id
+                 FROM parent_chunk_children
+                 ORDER BY parent_id, ordinal",
+            )
+            .map_err(Error::Sql)?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(Error::Sql)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::Sql)?
+    };
+    attach_parent_children(&mut parents, children)?;
+    Ok(parents)
+}
+
 fn attach_parent_children(
     parents: &mut [ParentChunk],
     children: impl IntoIterator<Item = (String, String)>,
@@ -243,5 +249,16 @@ mod tests {
 
         assert_eq!(parents[0].child_chunk_ids, ["child-a", "child-b"]);
         assert_eq!(parents[1].child_chunk_ids, ["child-c"]);
+    }
+
+    #[test]
+    fn bulk_parent_load_reuses_caller_transaction() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = Archive::open(&dir.path().join("archive.sqlite3")).expect("open archive");
+
+        let parents: Result<Vec<ParentChunk>> =
+            archive.in_transaction(|| archive.all_parent_chunks());
+
+        assert!(parents.expect("load parents inside transaction").is_empty());
     }
 }

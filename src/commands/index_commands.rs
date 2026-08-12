@@ -3,7 +3,8 @@ use anyhow::{Context, Result};
 use katok::{
     archive::Archive,
     config::KatokConfig,
-    semantic::{index_semantic_live, planned_semantic_documents},
+    semantic::{index_semantic_live_for_parents, planned_semantic_documents_for_parents},
+    types::ParentChunk,
 };
 use std::path::Path;
 
@@ -20,7 +21,10 @@ pub(crate) fn run(
         anyhow::bail!("archive is missing; run katok sync before katok index");
     }
     let archive = Archive::open(archive_path).context("open archive")?;
-    let chunks = archive.all_chunks().context("load chunks")?;
+    let candidate_chunks = archive.chunk_count().context("count chunks")?;
+    let parents = archive
+        .all_parent_chunks()
+        .context("load semantic parent windows")?;
     if !dry_run {
         return run_live_index(LiveIndexInput {
             full,
@@ -28,15 +32,16 @@ pub(crate) fn run(
             json,
             config,
             archive: &archive,
+            parents: &parents,
             semantic_dir,
-            candidate_chunks: chunks.len(),
+            candidate_chunks,
         });
     }
-    let documents = planned_semantic_documents(&archive, semantic_dir).context("plan documents")?;
+    let documents = planned_semantic_documents_for_parents(&parents, semantic_dir);
     let payload = serde_json::json!({
         "full": full,
         "dry_run": dry_run,
-        "candidate_chunks": chunks.len(),
+        "candidate_chunks": candidate_chunks,
         "written_documents": 0,
         "embedding_calls": 0,
         "documents": documents,
@@ -52,6 +57,7 @@ struct LiveIndexInput<'a> {
     json: bool,
     config: &'a KatokConfig,
     archive: &'a Archive,
+    parents: &'a [ParentChunk],
     semantic_dir: &'a Path,
     candidate_chunks: usize,
 }
@@ -62,8 +68,9 @@ fn run_live_index(input: LiveIndexInput<'_>) -> Result<()> {
         .build()
         .context("create semantic runtime")?;
     let report = runtime
-        .block_on(index_semantic_live(
+        .block_on(index_semantic_live_for_parents(
             input.archive,
+            input.parents,
             input.semantic_dir,
             input.config,
             input.full,
@@ -71,8 +78,7 @@ fn run_live_index(input: LiveIndexInput<'_>) -> Result<()> {
         .context("index semantic documents")?;
     let generation = katok::semantic::current_generation(input.semantic_dir)
         .context("resolve committed semantic generation")?;
-    let documents = planned_semantic_documents(input.archive, &generation)
-        .context("report semantic documents")?;
+    let documents = planned_semantic_documents_for_parents(input.parents, &generation);
     let payload = serde_json::json!({
         "full": input.full,
         "dry_run": input.dry_run,

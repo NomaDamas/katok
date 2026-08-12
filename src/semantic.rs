@@ -8,12 +8,13 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 pub use live::{
-    committed_cursor, index_semantic_live, semantic_search_live_with_config, SemanticIndexReport,
-    STORE_DIR,
+    committed_cursor, index_semantic_live, index_semantic_live_for_parents,
+    semantic_search_live_with_config, SemanticIndexReport, STORE_DIR,
 };
 pub use mock::{
-    planned_semantic_documents, semantic_search, semantic_search_with_snippet,
-    write_semantic_documents, SemanticDocument,
+    planned_semantic_documents, planned_semantic_documents_for_parents, semantic_search,
+    semantic_search_with_snippet, write_semantic_documents, write_semantic_documents_for_parents,
+    SemanticDocument,
 };
 
 pub(crate) const CHUNK_SCHEMA_ID: &str = "katok-kakao-parent-window-v1";
@@ -27,6 +28,10 @@ pub fn semantic_source_dir(root: &std::path::Path) -> std::path::PathBuf {
 
 pub fn archive_revision(archive: &Archive) -> Result<String> {
     let parents = archive.all_parent_chunks()?;
+    Ok(archive_revision_for_parents(&parents))
+}
+
+pub(crate) fn archive_revision_for_parents(parents: &[crate::types::ParentChunk]) -> String {
     let mut material = String::new();
     for parent in parents {
         material.push_str(&parent.parent_id);
@@ -34,7 +39,7 @@ pub fn archive_revision(archive: &Archive) -> Result<String> {
         material.push_str(&content_hash(&parent.text));
         material.push('\0');
     }
-    Ok(content_hash(&material))
+    content_hash(&material)
 }
 
 pub fn current_generation(root: &Path) -> Result<PathBuf> {
