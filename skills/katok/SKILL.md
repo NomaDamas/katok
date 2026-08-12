@@ -87,6 +87,8 @@ asks to send or stage a message.
   stalking, harassment, privacy violations, or protection-measure evasion.
 - Read `ACCEPTABLE_USE_POLICY.md` and `DISCLAIMER.md`; Accessibility permission
   is not Kakao approval.
+- Image paste UI failures (webp confirm miss → PNG once, etc.): see
+  [`katok-send` Troubleshooting](../katok-send/SKILL.md#troubleshooting).
 
 `--source macos` reads the live macOS KakaoTalk SQLCipher database locally in Rust; the terminal must have Full Disk Access to `~/Library/Containers/com.kakao.KakaoTalkMac/`.
 

@@ -91,22 +91,22 @@ pub fn database_name(user_id: i64, uuid: &str) -> String {
 mod tests {
     use super::*;
 
-    const ORACLE_UUID: &str = "00000000-1111-2222-3333-444444444444";
-    const ORACLE_USER_ID: i64 = 1_000_000_001;
+    const SYNTHETIC_UUID: &str = "00000000-1111-2222-3333-444444444444";
+    const SYNTHETIC_USER_ID: i64 = 1_000_000_001;
 
     #[test]
-    fn database_name_matches_known_oracle() {
-        // Empirically verified filename for this (uuid, user_id) on the
-        // reference machine. A perfect oracle for the PBKDF2 / string port.
+    fn database_name_matches_independent_synthetic_vector() {
+        // Expected bytes were calculated independently with Python's
+        // hashlib.pbkdf2_hmac from these explicitly synthetic inputs.
         assert_eq!(
-            database_name(ORACLE_USER_ID, ORACLE_UUID),
+            database_name(SYNTHETIC_USER_ID, SYNTHETIC_UUID),
             "de345a8eb68ff0db3c1f8b94817936a00471d335162afc05cdfc758f638a33d427ea7742d4d420"
         );
     }
 
     #[test]
     fn secure_key_is_256_lowercase_hex() {
-        let key = secure_key(ORACLE_USER_ID, ORACLE_UUID);
+        let key = secure_key(SYNTHETIC_USER_ID, SYNTHETIC_UUID);
         assert_eq!(key.len(), 256);
         assert!(key
             .chars()
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn hashed_device_uuid_is_base64_of_52_bytes() {
-        let hashed = hashed_device_uuid(ORACLE_UUID);
+        let hashed = hashed_device_uuid(SYNTHETIC_UUID);
         let decoded = BASE64_STANDARD.decode(&hashed).expect("valid base64");
         assert_eq!(decoded.len(), 20 + 32);
     }
