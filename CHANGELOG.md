@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.1 - 2026-08-12
+
+### Privacy
+
+- Replaced live-derived KakaoTalk identity fixtures with explicit synthetic
+  values and hardened the publication privacy checks.
+- Added a full-history CI and release gate that rejects non-synthetic UUIDs,
+  plausible KakaoTalk user identifiers, derived database-name oracles, and
+  personal home paths in every newly introduced commit, including values
+  removed by a later commit.
+
+### Search and indexing
+
+- Search indexes now recover atomically from orphaned, stale, or corrupt
+  generations while preserving the last committed generation when rebuilding
+  fails.
+- Semantic parent-window loading and bulk index preparation now avoid
+  repeated per-result archive reads.
+
 ## 0.3.0 - 2026-08-02
 
 ### Sending
