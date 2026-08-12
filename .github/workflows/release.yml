@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Resolve version
         id: version
@@ -59,6 +61,12 @@ jobs:
 
       - name: Verify release config
         run: python3 scripts/verify_release_config.py
+
+      - name: Test history privacy gate
+        run: bash tests/verify_history_privacy.sh
+
+      - name: Verify Git history privacy
+        run: python3 scripts/verify_history_privacy.py . "${GITHUB_SHA}"
 
   binaries:
     name: Build ${{ matrix.target }}
