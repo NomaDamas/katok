@@ -1,16 +1,20 @@
 use crate::{
-    archive::Archive, config::KatokConfig, search::hydrate_parent_hits, types::SearchHit, Error,
-    Result,
+    archive::Archive,
+    config::KatokConfig,
+    search::hydrate_parent_hits,
+    types::{ParentChunk, SearchHit},
+    Error, Result,
 };
+use rayon::prelude::*;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::{path::Path, time::Duration};
+use std::{collections::HashMap, path::Path, time::Duration};
 
 use super::{
-    archive_revision, content_hash, current_generation,
+    archive_revision, archive_revision_for_parents, content_hash, current_generation,
     embedder::create_embedder,
-    mock::write_semantic_documents_plain,
-    store::{LocalVectorStore, VectorUpsert},
+    mock::write_semantic_documents_plain_for_parents,
+    store::{LocalVectorStore, StoredVector, VectorUpsert},
     CHUNK_SCHEMA_ID, CURRENT_FILE, GENERATIONS_DIR, SOURCE_ID,
 };
 
@@ -48,10 +52,21 @@ pub async fn index_semantic_live(
     config: &KatokConfig,
     full: bool,
 ) -> Result<SemanticIndexReport> {
+    let parents = archive.all_parent_chunks()?;
+    index_semantic_live_for_parents(archive, &parents, root, config, full).await
+}
+
+pub async fn index_semantic_live_for_parents(
+    archive: &Archive,
+    parents: &[ParentChunk],
+    root: &Path,
+    config: &KatokConfig,
+    full: bool,
+) -> Result<SemanticIndexReport> {
     crate::paths::ensure_private_dir(root)?;
     crate::paths::ensure_private_dir(&root.join(GENERATIONS_DIR))?;
     let _writer = IndexWriterGuard::acquire(root)?;
-    let revision = archive_revision(archive)?;
+    let revision = archive_revision_for_parents(parents);
     let generation_id = format!(
         "gen-{}-{}-{}",
         &revision[..16],
@@ -63,8 +78,7 @@ pub async fn index_semantic_live(
         .join(format!(".{generation_id}.staging"));
     let mut staging_guard = StagingGuard::new(staging.clone());
     crate::paths::ensure_private_dir(&staging)?;
-    let written = write_semantic_documents_plain(archive, &staging)?;
-    let parents = archive.all_parent_chunks()?;
+    let written = write_semantic_documents_plain_for_parents(parents, &staging)?;
     let store = LocalVectorStore::open(
         &staging.join(STORE_DIR),
         usize::from(config.vector_dimension),
@@ -72,58 +86,47 @@ pub async fn index_semantic_live(
     let mut embedder = create_embedder(config)?;
     let prior_generation = current_generation(root);
     let mut self_healed = false;
-    let prior_store = if full {
-        None
+    let prior_vectors = if full {
+        HashMap::new()
     } else {
         match prior_generation {
-            Ok(generation) => match validate_generation(
-                archive,
-                &generation,
-                embedder.id(),
-                config.vector_dimension,
-            ) {
-                Ok(()) => Some(LocalVectorStore::open_existing(
-                    &generation.join(STORE_DIR),
-                    usize::from(config.vector_dimension),
-                )?),
-                Err(Error::SemanticIndexStale(_) | Error::Embedding(_) | Error::Sql(_)) => {
-                    self_healed = true;
-                    None
+            Ok(generation) => {
+                match load_reusable_vectors(&generation, embedder.id(), config.vector_dimension) {
+                    Ok((cursor, vectors)) => {
+                        let expected = expected_content_pairs(parents);
+                        let mut actual = vectors
+                            .values()
+                            .map(|stored| (stored.chunk_id.clone(), stored.content_hash.clone()))
+                            .collect::<Vec<_>>();
+                        actual.sort();
+                        self_healed = cursor.archive_revision != revision || actual != expected;
+                        vectors
+                    }
+                    Err(Error::SemanticIndexStale(_) | Error::Embedding(_) | Error::Sql(_)) => {
+                        self_healed = true;
+                        HashMap::new()
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) => return Err(error),
-            },
-            Err(Error::SemanticIndexMissing | Error::SemanticIndexStale(_)) => None,
+            }
+            Err(Error::SemanticIndexMissing) => HashMap::new(),
+            Err(Error::SemanticIndexStale(_)) => {
+                self_healed = true;
+                HashMap::new()
+            }
             Err(error) => return Err(error),
         }
     };
     let mut pending = Vec::new();
     let mut reused_vectors = 0usize;
 
-    for parent in parents {
-        let hash = content_hash(&parent.text);
-        let heading_path = format!("{} / parent window", parent.chat_name);
-        if let Some(stored) = prior_store
-            .as_ref()
-            .and_then(|prior| prior.fetch(&parent.parent_id).transpose())
-            .transpose()?
-            .filter(|stored| stored.content_hash == hash)
-        {
-            reused_vectors += 1;
-            store.upsert(&VectorUpsert {
-                chunk_id: parent.parent_id,
-                content_hash: hash,
-                seen_token: revision.clone(),
-                heading_path,
-                vector: stored.vector,
-            })?;
-        } else {
-            pending.push(PendingChunk {
-                chunk_id: parent.parent_id,
-                content_hash: hash,
-                seen_token: revision.clone(),
-                heading_path,
-                text: parent.text,
-            });
+    for chunk in prepare_parent_chunks(parents, &prior_vectors, &revision) {
+        match chunk {
+            PreparedChunk::Reused(item) => {
+                reused_vectors += 1;
+                store.upsert(&item)?;
+            }
+            PreparedChunk::Pending(item) => pending.push(item),
         }
     }
 
@@ -212,12 +215,8 @@ fn validate_generation(
             current_revision, cursor.archive_revision
         )));
     }
-    let mut expected = archive
-        .all_parent_chunks()?
-        .into_iter()
-        .map(|parent| (parent.parent_id, content_hash(&parent.text)))
-        .collect::<Vec<_>>();
-    expected.sort();
+    let parents = archive.all_parent_chunks()?;
+    let expected = expected_content_pairs(&parents);
     let actual =
         LocalVectorStore::open_existing(&generation.join(STORE_DIR), usize::from(dimension))?
             .content_pairs()?;
@@ -236,6 +235,64 @@ struct PendingChunk {
     seen_token: String,
     heading_path: String,
     text: String,
+}
+
+enum PreparedChunk {
+    Reused(VectorUpsert),
+    Pending(PendingChunk),
+}
+
+fn prepare_parent_chunks(
+    parents: &[ParentChunk],
+    stored: &HashMap<String, StoredVector>,
+    seen_token: &str,
+) -> Vec<PreparedChunk> {
+    parents
+        .par_iter()
+        .map(|parent| {
+            let hash = content_hash(&parent.text);
+            let heading_path = format!("{} / parent window", parent.chat_name);
+            match stored.get(&parent.parent_id) {
+                Some(stored) if stored.content_hash == hash => {
+                    PreparedChunk::Reused(VectorUpsert {
+                        chunk_id: parent.parent_id.clone(),
+                        content_hash: hash,
+                        seen_token: seen_token.to_string(),
+                        heading_path,
+                        vector: stored.vector.clone(),
+                    })
+                }
+                Some(_) | None => PreparedChunk::Pending(PendingChunk {
+                    chunk_id: parent.parent_id.clone(),
+                    content_hash: hash,
+                    seen_token: seen_token.to_string(),
+                    heading_path,
+                    text: parent.text.clone(),
+                }),
+            }
+        })
+        .collect()
+}
+
+fn load_reusable_vectors(
+    generation: &Path,
+    embedder_id: &str,
+    dimension: u16,
+) -> Result<(SemanticCursor, HashMap<String, StoredVector>)> {
+    let cursor = load_cursor(generation)?;
+    validate_cursor(&cursor, embedder_id)?;
+    let store =
+        LocalVectorStore::open_existing(&generation.join(STORE_DIR), usize::from(dimension))?;
+    Ok((cursor, store.stored_vectors()?))
+}
+
+fn expected_content_pairs(parents: &[ParentChunk]) -> Vec<(String, String)> {
+    let mut pairs = parents
+        .par_iter()
+        .map(|parent| (parent.parent_id.clone(), content_hash(&parent.text)))
+        .collect::<Vec<_>>();
+    pairs.sort();
+    pairs
 }
 
 fn embed_pending(

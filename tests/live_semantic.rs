@@ -70,6 +70,20 @@ fn live_semantic_cli_indexes_local_embeddings_and_searches_without_endpoint() {
         .args([
             "--data-dir",
             data_dir.to_str().expect("utf8 data"),
+            "index",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"embedding_calls\": 0"))
+        .stdout(predicate::str::contains("\"embedded_texts\": 0"));
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .env("KATOK_EMBEDDER", "local-test")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 data"),
             "search",
             "semantic",
             "회의 보고서",

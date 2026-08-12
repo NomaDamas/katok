@@ -3,9 +3,36 @@ use katok::{
     chunking::rebuild_chunks,
     fixture::read_fixture,
     search::{bm25_search, keyword_search},
-    semantic::{semantic_search, write_semantic_documents},
+    semantic::{
+        planned_semantic_documents_for_parents, semantic_search, write_semantic_documents,
+        write_semantic_documents_for_parents,
+    },
     types::RawMessage,
 };
+
+#[test]
+fn semantic_documents_accept_a_loaded_parent_snapshot() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive_path = dir.path().join("archive.sqlite3");
+    let archive = Archive::open(&archive_path).expect("open archive");
+    let fixture_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/kakao/replies.jsonl");
+    let messages = read_fixture(&fixture_path).expect("read fixture");
+
+    archive.sync_messages(&messages).expect("sync messages");
+    rebuild_chunks(&archive).expect("rebuild chunks");
+    let parents = archive.all_parent_chunks().expect("load parents");
+    let semantic_dir = dir.path().join("semantic");
+
+    let planned = planned_semantic_documents_for_parents(&parents, &semantic_dir);
+    let written = write_semantic_documents_for_parents(&parents, &semantic_dir)
+        .expect("write semantic documents");
+
+    assert_eq!(planned.len(), parents.len());
+    assert_eq!(written, parents.len());
+    assert_eq!(planned[0].chunk_id, parents[0].parent_id);
+    assert!(planned.iter().all(|document| document.path.exists()));
+}
 
 #[test]
 fn same_sender_reply_and_search_behaviors_when_fixture_is_indexed() {

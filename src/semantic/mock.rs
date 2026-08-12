@@ -1,4 +1,10 @@
-use crate::{archive::Archive, search::hydrate_parent_hits, types::SearchHit, Error, Result};
+use crate::{
+    archive::Archive,
+    search::hydrate_parent_hits,
+    types::{ParentChunk, SearchHit},
+    Error, Result,
+};
+use rayon::prelude::*;
 use std::{fs, io::Write, path::Path};
 
 use super::{document_path, semantic_source_dir};
@@ -10,35 +16,47 @@ pub struct SemanticDocument {
 }
 
 pub fn planned_semantic_documents(archive: &Archive, dir: &Path) -> Result<Vec<SemanticDocument>> {
+    let parents = archive.all_parent_chunks()?;
+    Ok(planned_semantic_documents_for_parents(&parents, dir))
+}
+
+pub fn planned_semantic_documents_for_parents(
+    parents: &[ParentChunk],
+    dir: &Path,
+) -> Vec<SemanticDocument> {
     let dir = semantic_source_dir(dir);
-    archive
-        .all_parent_chunks()?
-        .into_iter()
-        .map(|parent| {
-            Ok(SemanticDocument {
-                path: document_path(&dir, &parent.parent_id),
-                chunk_id: parent.parent_id,
-            })
+    parents
+        .par_iter()
+        .map(|parent| SemanticDocument {
+            path: document_path(&dir, &parent.parent_id),
+            chunk_id: parent.parent_id.clone(),
         })
         .collect()
 }
 
 pub fn write_semantic_documents(archive: &Archive, dir: &Path) -> Result<usize> {
-    let written = write_semantic_documents_plain(archive, dir)?;
+    let parents = archive.all_parent_chunks()?;
+    write_semantic_documents_for_parents(&parents, dir)
+}
+
+pub fn write_semantic_documents_for_parents(parents: &[ParentChunk], dir: &Path) -> Result<usize> {
+    let written = write_semantic_documents_plain_for_parents(parents, dir)?;
     if let Some(root) = semantic_source_dir(dir).parent().and_then(Path::parent) {
         fs::write(root.join("INDEXED_WITH_MOCK"), b"mock\n").map_err(Error::Io)?;
     }
     Ok(written)
 }
 
-pub(crate) fn write_semantic_documents_plain(archive: &Archive, dir: &Path) -> Result<usize> {
+pub(crate) fn write_semantic_documents_plain_for_parents(
+    parents: &[ParentChunk],
+    dir: &Path,
+) -> Result<usize> {
     let dir = semantic_source_dir(dir);
     if dir.exists() {
         fs::remove_dir_all(&dir).map_err(Error::Io)?;
     }
     crate::paths::ensure_private_dir(&dir)?;
-    let parents = archive.all_parent_chunks()?;
-    for parent in &parents {
+    parents.par_iter().try_for_each(|parent| -> Result<()> {
         let path = document_path(&dir, &parent.parent_id);
         let mut file = fs::File::create(&path).map_err(Error::Io)?;
         writeln!(file, "parent_id: {}", parent.parent_id).map_err(Error::Io)?;
@@ -58,7 +76,8 @@ pub(crate) fn write_semantic_documents_plain(archive: &Archive, dir: &Path) -> R
         .map_err(Error::Io)?;
         writeln!(file, "---").map_err(Error::Io)?;
         writeln!(file, "{}", parent.text).map_err(Error::Io)?;
-    }
+        Ok(())
+    })?;
     Ok(parents.len())
 }
 

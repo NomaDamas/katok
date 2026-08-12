@@ -1,6 +1,6 @@
 use crate::{Error, Result};
 use rusqlite::{params, Connection, OpenFlags};
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 pub(crate) struct LocalVectorStore {
     conn: Connection,
@@ -9,6 +9,7 @@ pub(crate) struct LocalVectorStore {
 
 #[derive(Debug, Clone)]
 pub(crate) struct StoredVector {
+    pub chunk_id: String,
     pub content_hash: String,
     pub vector: Vec<f32>,
 }
@@ -51,22 +52,32 @@ impl LocalVectorStore {
         Ok(Self { conn, dimension })
     }
 
-    pub(crate) fn fetch(&self, chunk_id: &str) -> Result<Option<StoredVector>> {
+    pub(crate) fn stored_vectors(&self) -> Result<HashMap<String, StoredVector>> {
         let mut statement = self
             .conn
-            .prepare("SELECT chunk_id, content_hash, vector FROM vectors WHERE chunk_id = ?1")
+            .prepare("SELECT chunk_id, content_hash, vector FROM vectors")
             .map_err(Error::Sql)?;
-        let mut rows = statement.query(params![chunk_id]).map_err(Error::Sql)?;
-        let Some(row) = rows.next().map_err(Error::Sql)? else {
-            return Ok(None);
-        };
-        Ok(Some(StoredVector {
-            content_hash: row.get(1).map_err(Error::Sql)?,
-            vector: decode_vector(
-                &row.get::<_, Vec<u8>>(2).map_err(Error::Sql)?,
-                self.dimension,
-            )?,
-        }))
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(Error::Sql)?;
+        rows.map(|row| {
+            let (chunk_id, content_hash, vector) = row.map_err(Error::Sql)?;
+            Ok((
+                chunk_id.clone(),
+                StoredVector {
+                    chunk_id,
+                    content_hash,
+                    vector: decode_vector(&vector, self.dimension)?,
+                },
+            ))
+        })
+        .collect()
     }
 
     pub(crate) fn content_pairs(&self) -> Result<Vec<(String, String)>> {
@@ -221,4 +232,37 @@ fn dot(left: &[f32], right: &[f32]) -> f32 {
         .zip(right)
         .map(|(left, right)| left * right)
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vector(chunk_id: &str, content_hash: &str, values: [f32; 2]) -> VectorUpsert {
+        VectorUpsert {
+            chunk_id: chunk_id.to_string(),
+            content_hash: content_hash.to_string(),
+            seen_token: "seen".to_string(),
+            heading_path: "Synthetic room / parent window".to_string(),
+            vector: values.to_vec(),
+        }
+    }
+
+    #[test]
+    fn loads_vector_metadata_in_one_pass() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalVectorStore::open(dir.path(), 2).expect("open store");
+        store
+            .upsert(&vector("parent-b", "hash-b", [0.0, 1.0]))
+            .expect("upsert parent b");
+        store
+            .upsert(&vector("parent-a", "hash-a", [1.0, 0.0]))
+            .expect("upsert parent a");
+
+        let stored = store.stored_vectors().expect("load stored vectors");
+
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored["parent-a"].content_hash, "hash-a");
+        assert_eq!(stored["parent-b"].content_hash, "hash-b");
+    }
 }

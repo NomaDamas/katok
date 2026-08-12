@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use katok::archive::Archive;
 use predicates::prelude::*;
 
 fn fixture_path(name: &str) -> String {
@@ -225,6 +226,55 @@ fn cli_reports_semantic_index_states_when_embedder_is_local_test_or_mocked() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"full\": true"));
+}
+
+#[test]
+fn cli_index_counts_candidates_without_loading_chunk_bodies() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let data_dir = dir.path();
+    let fixture = fixture_path("replies.jsonl");
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "sync",
+            "--source",
+            "fixture",
+            &fixture,
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let archive_path = data_dir.join("archive.sqlite3");
+    let archive = Archive::open(&archive_path).expect("open archive");
+    let expected = archive.chunk_count().expect("count chunks");
+    archive
+        .connection()
+        .execute(
+            "UPDATE chunks SET chat_name = X'80'
+             WHERE rowid = (SELECT rowid FROM chunks ORDER BY rowid LIMIT 1)",
+            [],
+        )
+        .expect("make chunk body unreadable as utf8");
+    drop(archive);
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--data-dir",
+            data_dir.to_str().expect("utf8 path"),
+            "index",
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "\"candidate_chunks\": {expected}"
+        )));
 }
 
 #[test]

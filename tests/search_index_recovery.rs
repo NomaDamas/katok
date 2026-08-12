@@ -118,6 +118,53 @@ fn index_self_heals_an_orphan_generation_and_full_never_reuses_vectors() {
 }
 
 #[test]
+fn stale_but_structurally_valid_generation_reuses_unchanged_vectors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data = dir.path().join("data");
+    run_json(
+        &data,
+        &[
+            "sync",
+            "--source",
+            "fixture",
+            fixture("replies.jsonl").to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let first = run_json(&data, &["index", "--json"]);
+    assert!(first["embedded_texts"].as_u64().unwrap() > 0);
+
+    let extra = dir.path().join("extra.jsonl");
+    std::fs::write(
+        &extra,
+        concat!(
+            "{\"account_hash\":\"acct\",\"chat_id\":\"chat-new\",\"chat_name\":\"Synthetic new room\",",
+            "\"chat_type\":\"group\",\"message_id\":\"new-1\",\"sender_id\":\"sender-new\",",
+            "\"sender_nickname\":\"Tester\",\"timestamp\":\"2026-01-02T00:00:00Z\",",
+            "\"text\":\"brand new semantic material\",\"message_type\":\"text\",\"reply_to_message_id\":null}\n"
+        ),
+    )
+    .expect("write extra fixture");
+    run_json(
+        &data,
+        &[
+            "sync",
+            "--source",
+            "fixture",
+            extra.to_str().unwrap(),
+            "--json",
+        ],
+    );
+
+    let second = run_json(&data, &["index", "--json"]);
+    assert!(second["reused_vectors"].as_u64().unwrap() > 0);
+    assert!(second["embedded_texts"].as_u64().unwrap() > 0);
+    assert!(
+        second["embedded_texts"].as_u64().unwrap() < second["written_documents"].as_u64().unwrap()
+    );
+}
+
+#[test]
 fn failed_rebuild_keeps_the_committed_generation_and_returns_json_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let data_dir = dir.path().join("data");
