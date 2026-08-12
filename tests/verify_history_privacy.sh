@@ -37,4 +37,23 @@ git -C "${repo}" reflog expire --expire=now --all
 git -C "${repo}" gc --prune=now --quiet
 
 python3 "${root}/scripts/verify_history_privacy.py" "${repo}" HEAD >/dev/null
+
+git -C "${repo}" tag v0.1.0
+mkdir -p "${repo}/docs"
+printf '%s\n' 'release-safe' > "${repo}/docs/release.txt"
+git -C "${repo}" add .
+git -C "${repo}" commit -qm release-safe
+
+git -C "${repo}" branch release-main
+git -C "${repo}" checkout -q --detach v0.1.0
+mkdir -p "${repo}/docs"
+printf '%s\n' 'previous-release' > "${repo}/docs/previous-release.txt"
+git -C "${repo}" add .
+git -C "${repo}" commit -qm previous-release
+git -C "${repo}" tag -f v0.1.0
+git -C "${repo}" checkout -q release-main
+
+release_base="$(git -C "${repo}" merge-base v0.1.0 HEAD)"
+python3 "${root}/scripts/verify_history_privacy.py" \
+  "${repo}" "${release_base}..HEAD" >/dev/null
 echo "ok: history privacy scanner rejects old leaks and accepts rewritten history"
