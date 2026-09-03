@@ -6,8 +6,8 @@
 //!   b. katok cache `<data_dir>/kakao/auth.json` ({user_id, uuid}, 0600)
 //!   c. k-skill cache bootstrap (`~/.cache/k-skill/kakaotalk-mac-auth.json`,
 //!      read ONLY `user_id`)
-//!   d. preference plist candidates (direct keys + AlertKakaoIDsList)
-//!   e. rayon SHA-512 pre-image recovery of an active DESIGNATEDFRIENDSREVISION
+//!   d. newest preference plist's active DESIGNATEDFRIENDSREVISION
+//!   e. preference plist candidates (direct keys + AlertKakaoIDsList)
 //!
 //! Privacy: only `{user_id, uuid}` is ever persisted by katok, never the key.
 
@@ -135,7 +135,7 @@ fn preference_paths(home: &Path) -> Vec<PathBuf> {
         .join("Library")
         .join("Preferences");
     if let Ok(entries) = std::fs::read_dir(&pref_dir) {
-        let mut matched: Vec<PathBuf> = entries
+        let matched: Vec<PathBuf> = entries
             .flatten()
             .map(|entry| entry.path())
             .filter(|path| {
@@ -146,7 +146,6 @@ fn preference_paths(home: &Path) -> Vec<PathBuf> {
                     })
             })
             .collect();
-        matched.sort();
         paths.extend(matched);
     }
     let global = home
@@ -156,6 +155,21 @@ fn preference_paths(home: &Path) -> Vec<PathBuf> {
     if global.exists() && !paths.contains(&global) {
         paths.push(global);
     }
+    // Multiple KakaoTalk accounts leave one per-account plist behind.  The
+    // lexicographically first file can therefore belong to a previously used
+    // account.  Prefer the files touched by the most recent login while using
+    // the path as a deterministic tie-breaker.
+    paths.sort_by(|left, right| {
+        let left_modified = std::fs::metadata(left)
+            .and_then(|meta| meta.modified())
+            .ok();
+        let right_modified = std::fs::metadata(right)
+            .and_then(|meta| meta.modified())
+            .ok();
+        right_modified
+            .cmp(&left_modified)
+            .then_with(|| left.cmp(right))
+    });
     paths
 }
 
@@ -518,17 +532,39 @@ pub fn resolve_auth(options: &AuthOptions) -> Result<ResolvedAuth> {
         }
     }
 
-    // d. plist candidates
+    // d. active account hashes, newest preference file first.  This must run
+    // before the union of historical candidate ids: per-account preference
+    // files can outlive logout, and the numerically smallest valid candidate
+    // is not necessarily the account that is currently signed in.
     let mut candidates: Vec<i64> = Vec::new();
-    let mut active_hash: Option<String> = None;
+    let mut active_hashes: Vec<String> = Vec::new();
     for path in preference_paths(&options.home) {
         if let Some((ids, hash)) = read_plist(&path) {
             candidates.extend(ids);
-            if active_hash.is_none() {
-                active_hash = hash;
+            if let Some(hash) = hash {
+                if !active_hashes.contains(&hash) {
+                    active_hashes.push(hash);
+                }
             }
         }
     }
+
+    for hash in &active_hashes {
+        eprintln!("katok: recovering KakaoTalk user id (one-time SHA-512 scan)...");
+        if let Some(user_id) = recover_user_id_from_sha512(hash, options.max_user_id) {
+            if let Some(openable) = verify(user_id, &uuid, &database_files) {
+                persist_katok_cache(&katok_cache, user_id, &uuid);
+                return Ok(ResolvedAuth {
+                    user_id,
+                    uuid,
+                    source: "sha512-recovery",
+                    database_files: openable,
+                });
+            }
+        }
+    }
+
+    // e. historical plist candidates
     candidates.sort_unstable();
     candidates.dedup();
     for user_id in &candidates {
@@ -540,24 +576,6 @@ pub fn resolve_auth(options: &AuthOptions) -> Result<ResolvedAuth> {
                 source: "plist",
                 database_files: openable,
             });
-        }
-    }
-
-    // e. SHA-512 hash recovery (expensive; logged once)
-    if let Some(hash) = active_hash {
-        eprintln!("katok: recovering KakaoTalk user id (one-time SHA-512 scan)...");
-        if let Some(user_id) = recover_user_id_from_sha512(&hash, options.max_user_id) {
-            if !candidates.contains(&user_id) {
-                if let Some(openable) = verify(user_id, &uuid, &database_files) {
-                    persist_katok_cache(&katok_cache, user_id, &uuid);
-                    return Ok(ResolvedAuth {
-                        user_id,
-                        uuid,
-                        source: "sha512-recovery",
-                        database_files: openable,
-                    });
-                }
-            }
         }
     }
 
@@ -620,6 +638,27 @@ mod tests {
         std::fs::write(&suffixed, b"x").expect("write db file");
         let found = discover_database_files(dir.path());
         assert_eq!(found, vec![suffixed]);
+    }
+
+    #[test]
+    fn preference_paths_prioritize_the_most_recent_login_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pref_dir = dir
+            .path()
+            .join("Library/Containers/com.kakao.KakaoTalkMac/Data/Library/Preferences");
+        std::fs::create_dir_all(&pref_dir).expect("preference directory");
+
+        // A stale per-account plist can sort before the current one by name.
+        let stale =
+            pref_dir.join("com.kakao.KakaoTalkMac.1111111111111111111111111111111111111111.plist");
+        let current =
+            pref_dir.join("com.kakao.KakaoTalkMac.9999999999999999999999999999999999999999.plist");
+        std::fs::write(&stale, b"stale").expect("stale plist");
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        std::fs::write(&current, b"current").expect("current plist");
+
+        let paths = preference_paths(dir.path());
+        assert_eq!(paths.first(), Some(&current));
     }
 
     #[test]
