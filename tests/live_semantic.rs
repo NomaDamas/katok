@@ -130,6 +130,66 @@ fn live_semantic_cli_rejects_stale_remote_embedding_endpoint_config() {
         ));
 }
 
+#[test]
+fn loopback_http_provider_is_configurable_and_records_manifest_metadata() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let config = dir.path().join("katok.toml");
+    std::fs::write(
+        &config,
+        r#"embedding_provider = "loopback-http"
+embedding_endpoint = "http://127.0.0.1:9/embed"
+embedding_timeout_ms = 100
+embedding_query_prefix = "query: "
+embedding_passage_prefix = "passage: "
+"#,
+    )
+    .expect("write config");
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--config",
+            config.to_str().expect("utf8 config"),
+            "--data-dir",
+            dir.path().join("data").to_str().expect("utf8 data"),
+            "doctor",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"provider\": \"loopback-http\""))
+        .stdout(predicate::str::contains(
+            "\"endpoint\": \"http://127.0.0.1:9/embed\"",
+        ));
+}
+
+#[test]
+fn loopback_http_provider_rejects_non_loopback_endpoints() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let config = dir.path().join("katok.toml");
+    std::fs::write(
+        &config,
+        "embedding_provider = \"loopback-http\"\nembedding_endpoint = \"https://example.com/embed\"\n",
+    )
+    .expect("write config");
+
+    Command::cargo_bin("katok")
+        .expect("katok binary")
+        .args([
+            "--config",
+            config.to_str().expect("utf8 config"),
+            "--data-dir",
+            dir.path().join("data").to_str().expect("utf8 data"),
+            "doctor",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "embedding endpoint must be loopback",
+        ));
+}
+
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/kakao")

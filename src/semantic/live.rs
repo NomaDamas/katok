@@ -25,9 +25,9 @@ pub struct SemanticIndexReport {
     pub written_documents: usize,
     pub embedding_calls: usize,
     pub embedded_texts: usize,
-    pub embedder: &'static str,
-    pub vectorstore: &'static str,
-    pub semantic_units: &'static str,
+    pub embedder: String,
+    pub vectorstore: String,
+    pub semantic_units: String,
     pub archive_revision: String,
     pub reused_vectors: usize,
     pub self_healed: bool,
@@ -44,6 +44,18 @@ pub struct SemanticCursor {
     pub vectorstore: String,
     pub semantic_units: String,
     pub embedded_texts: usize,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub dimension: u16,
+    #[serde(default)]
+    pub query_prefix: String,
+    #[serde(default)]
+    pub passage_prefix: String,
+    #[serde(default)]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub provider_identity: String,
 }
 
 pub async fn index_semantic_live(
@@ -133,7 +145,7 @@ pub async fn index_semantic_live_for_parents(
     let embedded_texts = pending.len();
     let batch_size = config.embedding_batch_size.max(1);
     let embedding_calls = embed_pending(&store, &mut *embedder, &pending, batch_size)?;
-    save_cursor(&staging, &revision, embedder.id(), embedded_texts)?;
+    save_cursor(&staging, &revision, embedder.id(), embedded_texts, config)?;
     validate_generation(archive, &staging, embedder.id(), config.vector_dimension)?;
 
     let generation = root.join(GENERATIONS_DIR).join(&generation_id);
@@ -149,9 +161,9 @@ pub async fn index_semantic_live_for_parents(
         written_documents: written,
         embedding_calls,
         embedded_texts,
-        embedder: embedder.id(),
-        vectorstore: "local",
-        semantic_units: "parent_windows",
+        embedder: embedder.id().to_string(),
+        vectorstore: "local".to_string(),
+        semantic_units: "parent_windows".to_string(),
         archive_revision: revision,
         reused_vectors,
         self_healed,
@@ -327,7 +339,13 @@ fn embed_pending(
     Ok(pending.len().div_ceil(batch_size))
 }
 
-fn save_cursor(dir: &Path, revision: &str, embedder_id: &str, embedded_texts: usize) -> Result<()> {
+fn save_cursor(
+    dir: &Path,
+    revision: &str,
+    embedder_id: &str,
+    embedded_texts: usize,
+    config: &KatokConfig,
+) -> Result<()> {
     let cursor = SemanticCursor {
         source_id: SOURCE_ID.to_string(),
         completed_at: chrono::Utc::now().to_rfc3339(),
@@ -337,6 +355,12 @@ fn save_cursor(dir: &Path, revision: &str, embedder_id: &str, embedded_texts: us
         vectorstore: "local".to_string(),
         semantic_units: "parent_windows".to_string(),
         embedded_texts,
+        model: config.embedder_model.clone(),
+        dimension: config.vector_dimension,
+        query_prefix: config.embedding_query_prefix.clone(),
+        passage_prefix: config.embedding_passage_prefix.clone(),
+        timeout_ms: config.embedding_timeout_ms,
+        provider_identity: config.embedding_provider.clone(),
     };
     let json = serde_json::to_vec_pretty(&cursor).map_err(Error::Json)?;
     std::fs::write(dir.join("cursor.json"), json).map_err(Error::Io)
