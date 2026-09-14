@@ -654,8 +654,19 @@ mod tests {
         let current =
             pref_dir.join("com.kakao.KakaoTalkMac.9999999999999999999999999999999999999999.plist");
         std::fs::write(&stale, b"stale").expect("stale plist");
-        std::thread::sleep(std::time::Duration::from_millis(25));
         std::fs::write(&current, b"current").expect("current plist");
+        let current_file = std::fs::File::open(&current).expect("open current plist");
+        current_file
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(2),
+            ))
+            .expect("set current plist mtime");
+        let stale_file = std::fs::File::open(&stale).expect("open stale plist");
+        stale_file
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
+            ))
+            .expect("set stale plist mtime");
 
         let paths = preference_paths(dir.path());
         assert_eq!(paths.first(), Some(&current));
