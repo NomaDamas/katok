@@ -97,6 +97,12 @@ Use `katok chunk context <chunk-id> --json` to inspect the immediate previous an
 
 `katok index` runs the local `embeddinggemma-300m-q4` embedder in-process by default. Do not ask the user to start a Python, Jina, TEI, or local HTTP embedding server. Use `KATOK_EMBEDDER=mock` only for synthetic QA and `KATOK_EMBEDDER=local-test` only when you need deterministic local vector tests without downloading the model.
 
+An explicit `embedding_provider = "loopback-http"` configuration may target only a local
+`http://localhost`, `http://127.0.0.1`, or `http://[::1]` endpoint. The request sends embedding
+text and model only; archive identifiers, paths, mailbox metadata, and vector-store paths stay
+inside katok. Provider settings are recorded in each generation cursor and changing them requires
+a native `katok index --full` rebuild.
+
 The index never follows the KakaoTalk database on its own, so a search only ever reflects the last sync. Run `katok sync --source macos --json` before the first query of a session and before any question about recent messages. After sync, doctor compares the archive revision with the committed semantic generation and requests indexing when they differ; semantic search also refuses stale or orphaned generations instead of silently searching them. Freshness also depends on KakaoTalk itself running (`pgrep -x KakaoTalk`), because the source database receives new messages only while the app is up.
 
 Sync is cheap enough to run often because only chats whose messages changed have their chunk tails recomputed. Three runs still pay the full cost: the first sync on an empty archive, the first sync after `chunk_gap_group_seconds` or `chunk_gap_direct_seconds` changes, and the first sync after an upgrade that bumps the chunker version, which includes the first run against an archive written before the version was recorded. Each of these invalidates every stored chunk once, after which sync returns to the incremental path. The payload reports `rebuilt_chats` and a `timings_ms` breakdown (`read_source`, `upsert_messages`, `rebuild_chunks`), so a slow run can be attributed to a stage instead of guessed at.

@@ -360,9 +360,12 @@ fn run_doctor(
         "embedder": {
             "model": config.embedder_model,
             "dimension": config.vector_dimension,
-            "provider": "local",
+            "provider": config.embedding_provider,
             "mode": std::env::var("KATOK_EMBEDDER").unwrap_or_else(|_| "local".to_string()),
-            "endpoint": null
+            "endpoint": config.embedding_endpoint,
+            "timeout_ms": config.embedding_timeout_ms,
+            "query_prefix": config.embedding_query_prefix,
+            "passage_prefix": config.embedding_passage_prefix
         }
     });
     print_payload(json, &payload)

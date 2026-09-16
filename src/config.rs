@@ -16,6 +16,11 @@ pub struct KatokConfig {
     pub embedding_batch_size: usize,
     pub vector_dimension: u16,
     pub snippet_length: usize,
+    pub embedding_provider: String,
+    pub embedding_endpoint: Option<String>,
+    pub embedding_timeout_ms: u64,
+    pub embedding_query_prefix: String,
+    pub embedding_passage_prefix: String,
 }
 
 impl Default for KatokConfig {
@@ -29,16 +34,47 @@ impl Default for KatokConfig {
             embedding_batch_size: 64,
             vector_dimension: DEFAULT_VECTOR_DIMENSION,
             snippet_length: 80,
+            embedding_provider: "local".to_string(),
+            embedding_endpoint: None,
+            embedding_timeout_ms: 10_000,
+            embedding_query_prefix: "query: ".to_string(),
+            embedding_passage_prefix: "passage: ".to_string(),
         }
     }
 }
 
 impl KatokConfig {
     pub fn load(path: Option<&Path>) -> Result<Self> {
-        let Some(path) = path else {
-            return Ok(Self::default());
+        let config = if let Some(path) = path {
+            let content = std::fs::read_to_string(path).map_err(Error::Io)?;
+            toml::from_str(&content).map_err(Error::Config)?
+        } else {
+            Self::default()
         };
-        let content = std::fs::read_to_string(path).map_err(Error::Io)?;
-        toml::from_str(&content).map_err(Error::Config)
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        match self.embedding_provider.as_str() {
+            "local" => Ok(()),
+            "loopback-http" => {
+                let endpoint = self.embedding_endpoint.as_deref().ok_or_else(|| {
+                    Error::Embedding("loopback-http requires embedding_endpoint".to_string())
+                })?;
+                if !endpoint.starts_with("http://localhost:")
+                    && !endpoint.starts_with("http://127.0.0.1:")
+                    && !endpoint.starts_with("http://[::1]:")
+                {
+                    return Err(Error::Embedding(
+                        "embedding endpoint must be loopback and use http://".to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            provider => Err(Error::Embedding(format!(
+                "unsupported embedding provider: {provider}"
+            ))),
+        }
     }
 }
