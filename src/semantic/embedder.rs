@@ -296,3 +296,99 @@ fn normalize(vector: &mut [f32]) {
 fn to_embedding_error(error: impl std::fmt::Display) -> Error {
     Error::Embedding(error.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpListener;
+
+    /// The loopback runtime must see embedding text and the model name only:
+    /// archive identifiers, source paths, and store metadata stay inside katok.
+    #[test]
+    fn loopback_http_request_contains_only_model_and_text() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind capture server");
+        let port = listener.local_addr().expect("local addr").port();
+        let server = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    let read = reader.read_line(&mut line).expect("header line");
+                    if read == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.trim_end().split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            content_length = value.trim().parse().expect("content length");
+                        }
+                    }
+                }
+                let mut body = vec![0u8; content_length];
+                reader.read_exact(&mut body).expect("read body");
+                bodies.push(String::from_utf8(body).expect("utf8 body"));
+                let response = "{\"embeddings\":[[0.0,0.0,0.0]]}";
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(),
+                    response
+                )
+                .expect("write response");
+            }
+            bodies
+        });
+
+        let config = KatokConfig {
+            embedding_provider: "loopback-http".to_string(),
+            embedding_endpoint: Some(format!("http://127.0.0.1:{port}/embed")),
+            vector_dimension: 3,
+            ..KatokConfig::default()
+        };
+        let mut embedder = LoopbackHttpEmbedder::new(&config).expect("create embedder");
+
+        let embedded = embedder
+            .embed(
+                &["\u{ba54}\u{c2dc}\u{c9c0} \u{bcf8}\u{bb38}".to_string()],
+                1,
+            )
+            .expect("embed passage");
+        assert_eq!(embedded.len(), 1);
+        embedder
+            .embed_query("\u{ac80}\u{c0c9} \u{c9c8}\u{c758}")
+            .expect("embed query");
+
+        let bodies = server.join().expect("join capture server");
+        assert_eq!(bodies.len(), 2);
+
+        let passage: serde_json::Value =
+            serde_json::from_str(&bodies[0]).expect("passage request json");
+        let query: serde_json::Value =
+            serde_json::from_str(&bodies[1]).expect("query request json");
+        for body in [&passage, &query] {
+            let keys: std::collections::BTreeSet<&str> = body
+                .as_object()
+                .expect("request object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                keys,
+                ["input", "model"].into_iter().collect(),
+                "request must carry embedding text and model only: {body}"
+            );
+        }
+        assert_eq!(
+            passage["input"],
+            serde_json::json!(["passage: \u{ba54}\u{c2dc}\u{c9c0} \u{bcf8}\u{bb38}"])
+        );
+        assert_eq!(
+            query["input"],
+            serde_json::json!(["query: \u{ac80}\u{c0c9} \u{c9c8}\u{c758}"])
+        );
+        assert_eq!(passage["model"], serde_json::json!(DEFAULT_EMBEDDER_MODEL));
+    }
+}
