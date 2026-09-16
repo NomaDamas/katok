@@ -211,6 +211,8 @@ AutoRAG 같은 로컬 런타임을 명시적으로 연결하려면 `embedding_pr
 `[::1]`만 허용하며 HTTPS나 원격 주소로 우회하지 않습니다. 요청에는 model과 embedding text만
 포함되고 archive ID, source path, mailbox metadata, vector store path는 포함되지 않습니다.
 `embedding_timeout_ms`, `embedding_query_prefix`, `embedding_passage_prefix`도 설정할 수 있습니다.
+응답은 `{"embeddings": [[...]]}` JSON 형식이어야 하며, 요청한 텍스트 개수만큼의 벡터를
+`vector_dimension` 차원으로 반환해야 합니다.
 각 semantic generation의 `cursor.json`에는 provider identity와 이 설정들이 기록되므로 설정이
 바뀌면 이전 vector를 재사용하지 않습니다. 실패한 rebuild는 이전 `CURRENT` generation을 보존합니다.
 
