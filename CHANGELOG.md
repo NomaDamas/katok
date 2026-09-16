@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.3 - 2026-09-16
+
+### Kakao authentication
+
+- Prefer the most recently active KakaoTalk account when stale per-account
+  preference files remain: preference plists are ordered by modification time
+  and the active account hash is tried newest-first before historical
+  candidate IDs.
+
+### Search and indexing
+
+- Added an opt-in `loopback-http` embedding provider for shared local
+  runtimes such as AutoRAG's embedding gateway. Endpoints are restricted to
+  loopback HTTP, requests carry only the model name and embedding text,
+  provider settings are recorded in each generation cursor so configuration
+  changes force a rebuild, and the request/response contract is documented.
+
 ## 0.3.2 - 2026-08-12
 
 ### Release
